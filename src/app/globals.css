@@ -1,0 +1,158 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme inline {
+  --color-primary: #00E5FF;
+  --color-background-light: #f0fdfa;
+  --color-background-dark: #0A0A10;
+  --color-surface-dark: #12121A;
+  --color-border-dark: #1E1E2E;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-body: "Noto Sans", sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0A0A10;
+}
+::-webkit-scrollbar-thumb {
+  background: #1E1E2E;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2D2D3F;
+}
+
+/* Status dot animation */
+.status-dot {
+  box-shadow: 0 0 4px #00E5FF;
+}
+
+/* Execution card active state */
+.execution-card.active {
+  border-color: #00E5FF;
+  background-color: rgba(0, 229, 255, 0.05);
+  box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.5);
+}
+
+/* Wizard step active state */
+.wizard-step.active {
+  background-color: rgba(0, 229, 255, 0.1);
+  border-color: rgba(0, 229, 255, 0.4);
+  color: #00E5FF;
+}
+
+/* Selection */
+::selection {
+  background-color: rgba(0, 229, 255, 0.3);
+}
+
+body {
+  font-family: var(--font-display);
+  overflow: hidden;
+}
+
+.dark body {
+  background: #0A0A10;
+  color: #f3f4f6;
+}
+
+/* ── Markdown code blocks ── */
+.markdown-body pre {
+  background: #1a1a2e;
+  border: 1px solid #2d2d3f;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+  position: relative;
+}
+
+.markdown-body pre code {
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", "Menlo", monospace;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  background: transparent;
+  padding: 0;
+  border: none;
+  color: #e4e4e7;
+}
+
+.markdown-body :not(pre) > code {
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", "Menlo", monospace;
+  font-size: 0.8125rem;
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.15);
+  border-radius: 0.25rem;
+  padding: 0.125rem 0.375rem;
+  color: #00E5FF;
+}
+
+/* Copy button label on code blocks */
+.markdown-body pre .code-lang {
+  position: absolute;
+  top: 0.375rem;
+  right: 0.5rem;
+  font-size: 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+  user-select: none;
+}
+
+/* ── highlight.js theme (GitHub Dark Dimmed variant) ── */
+.hljs { color: #c9d1d9; }
+.hljs-comment,
+.hljs-quote { color: #6e7681; font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag { color: #ff7b72; }
+.hljs-string,
+.hljs-addition { color: #a5d6ff; }
+.hljs-number,
+.hljs-literal { color: #79c0ff; }
+.hljs-built_in,
+.hljs-type { color: #ffa657; }
+.hljs-title,
+.hljs-title\.class_,
+.hljs-section { color: #d2a8ff; }
+.hljs-attr,
+.hljs-attribute { color: #79c0ff; }
+.hljs-name,
+.hljs-tag { color: #7ee787; }
+.hljs-variable,
+.hljs-template-variable { color: #ffa657; }
+.hljs-regexp { color: #a5d6ff; }
+.hljs-symbol { color: #79c0ff; }
+.hljs-selector-class,
+.hljs-selector-id { color: #7ee787; }
+.hljs-deletion { color: #ffa198; background: rgba(248,81,73,0.1); }
+.hljs-addition { background: rgba(63,185,80,0.1); }
+.hljs-meta { color: #d2a8ff; }
+.hljs-params { color: #c9d1d9; }
+.hljs-punctuation { color: #8b949e; }
+
+/* Light mode overrides */
+@media (prefers-color-scheme: light) {
+  .markdown-body pre {
+    background: #f6f8fa;
+    border-color: #d0d7de;
+  }
+  .markdown-body pre code { color: #1f2328; }
+  .markdown-body :not(pre) > code {
+    background: rgba(0, 150, 180, 0.08);
+    border-color: rgba(0, 150, 180, 0.2);
+    color: #0077b6;
+  }
+  .hljs { color: #1f2328; }
+  .hljs-comment, .hljs-quote { color: #6e7781; }
+  .hljs-keyword, .hljs-selector-tag { color: #cf222e; }
+  .hljs-string, .hljs-addition { color: #0a3069; }
+  .hljs-number, .hljs-literal { color: #0550ae; }
+  .hljs-built_in, .hljs-type { color: #953800; }
+  .hljs-title, .hljs-title\.class_, .hljs-section { color: #8250df; }
+  .hljs-name, .hljs-tag { color: #116329; }
+}
