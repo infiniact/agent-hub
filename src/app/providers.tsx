@@ -21,7 +21,22 @@ export function Providers({ children }: { children: React.ReactNode }) {
     // Load settings and scan for agents
     loadSettings();
     scanForAgents();
-    fetchAgents();
+
+    // Fetch agents then merge DB-cached models into discoveredAgents
+    fetchAgents().then(() => {
+      const agents = useAgentStore.getState().agents;
+      const acpStore = useAcpStore.getState();
+      for (const agent of agents) {
+        if (agent.acp_command && agent.available_models_json) {
+          try {
+            const models: string[] = JSON.parse(agent.available_models_json);
+            if (models.length > 0) {
+              acpStore.updateDiscoveredAgentModels(agent.acp_command, models);
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    });
 
     // Initialize Tauri event listeners for chat
     initializeChatListeners();

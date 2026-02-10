@@ -1,5 +1,7 @@
 @import "tailwindcss";
+@import "@vscode/codicons/dist/codicon.css";
 @plugin "@tailwindcss/typography";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
   --color-primary: #00E5FF;
@@ -7,11 +9,11 @@
   --color-background-dark: #0A0A10;
   --color-surface-dark: #12121A;
   --color-border-dark: #1E1E2E;
-  --font-display: "Space Grotesk", sans-serif;
-  --font-body: "Noto Sans", sans-serif;
+  --font-display: "Space Grotesk", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-body: "Noto Sans", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar – dark mode (default) */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -26,6 +28,22 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #2D2D3F;
 }
+
+/* Custom scrollbar – light mode */
+:root:not(.dark) ::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+:root:not(.dark) ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+:root:not(.dark) ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Hide scrollbar but keep scrolling (for horizontal strips) */
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
 /* Status dot animation */
 .status-dot {
@@ -46,6 +64,18 @@
   color: #00E5FF;
 }
 
+/* Light mode overrides for execution card & wizard step */
+:root:not(.dark) .execution-card.active {
+  background-color: rgba(0, 150, 180, 0.06);
+  border-color: #0097a7;
+  box-shadow: 0 0 0 1px rgba(0, 150, 180, 0.4);
+}
+:root:not(.dark) .wizard-step.active {
+  background-color: rgba(0, 150, 180, 0.08);
+  border-color: rgba(0, 150, 180, 0.4);
+  color: #00838f;
+}
+
 /* Selection */
 ::selection {
   background-color: rgba(0, 229, 255, 0.3);
@@ -54,11 +84,6 @@
 body {
   font-family: var(--font-display);
   overflow: hidden;
-}
-
-.dark body {
-  background: #0A0A10;
-  color: #f3f4f6;
 }
 
 /* ── Markdown code blocks ── */
@@ -135,24 +160,22 @@ body {
 .hljs-params { color: #c9d1d9; }
 .hljs-punctuation { color: #8b949e; }
 
-/* Light mode overrides */
-@media (prefers-color-scheme: light) {
-  .markdown-body pre {
-    background: #f6f8fa;
-    border-color: #d0d7de;
-  }
-  .markdown-body pre code { color: #1f2328; }
-  .markdown-body :not(pre) > code {
-    background: rgba(0, 150, 180, 0.08);
-    border-color: rgba(0, 150, 180, 0.2);
-    color: #0077b6;
-  }
-  .hljs { color: #1f2328; }
-  .hljs-comment, .hljs-quote { color: #6e7781; }
-  .hljs-keyword, .hljs-selector-tag { color: #cf222e; }
-  .hljs-string, .hljs-addition { color: #0a3069; }
-  .hljs-number, .hljs-literal { color: #0550ae; }
-  .hljs-built_in, .hljs-type { color: #953800; }
-  .hljs-title, .hljs-title\.class_, .hljs-section { color: #8250df; }
-  .hljs-name, .hljs-tag { color: #116329; }
+/* Light mode overrides (class-based) */
+:root:not(.dark) .markdown-body pre {
+  background: #f6f8fa;
+  border-color: #d0d7de;
 }
+:root:not(.dark) .markdown-body pre code { color: #1f2328; }
+:root:not(.dark) .markdown-body :not(pre) > code {
+  background: rgba(0, 150, 180, 0.08);
+  border-color: rgba(0, 150, 180, 0.2);
+  color: #0077b6;
+}
+:root:not(.dark) .hljs { color: #1f2328; }
+:root:not(.dark) .hljs-comment, :root:not(.dark) .hljs-quote { color: #6e7781; }
+:root:not(.dark) .hljs-keyword, :root:not(.dark) .hljs-selector-tag { color: #cf222e; }
+:root:not(.dark) .hljs-string, :root:not(.dark) .hljs-addition { color: #0a3069; }
+:root:not(.dark) .hljs-number, :root:not(.dark) .hljs-literal { color: #0550ae; }
+:root:not(.dark) .hljs-built_in, :root:not(.dark) .hljs-type { color: #953800; }
+:root:not(.dark) .hljs-title, :root:not(.dark) .hljs-title\.class_, :root:not(.dark) .hljs-section { color: #8250df; }
+:root:not(.dark) .hljs-name, :root:not(.dark) .hljs-tag { color: #116329; }

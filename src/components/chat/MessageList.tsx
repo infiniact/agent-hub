@@ -5,7 +5,7 @@ import { ChatMessage } from "./ChatMessage";
 import { ToolCallDisplay } from "./ToolCallDisplay";
 import { MarkdownContent } from "./MarkdownContent";
 import { useEffect, useRef } from "react";
-import { Bot } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 
 export function MessageList() {
   const messages = useChatStore((s) => s.messages);
@@ -33,7 +33,7 @@ export function MessageList() {
       {hasStreamingContent && (
         <div className="flex gap-4 pr-12">
           <div className="size-8 rounded-full flex-none bg-primary/20 flex items-center justify-center">
-            <Bot className="size-4 text-primary" />
+            <Codicon name="hubot" className="text-primary" />
           </div>
           <div className="flex flex-col gap-2 min-w-0 flex-1 max-w-[80%]">
             {/* Tool calls */}
@@ -68,7 +68,7 @@ export function MessageList() {
       {isStreaming && !streamedContent && toolCalls.length === 0 && (
         <div className="flex gap-4 pr-12">
           <div className="size-8 rounded-full flex-none bg-primary/20 flex items-center justify-center">
-            <Bot className="size-4 text-primary" />
+            <Codicon name="hubot" className="text-primary" />
           </div>
           <div className="flex items-center gap-2 text-slate-400 dark:text-gray-500 text-xs py-2">
             <span className="inline-block w-2 h-4 bg-primary animate-pulse" />

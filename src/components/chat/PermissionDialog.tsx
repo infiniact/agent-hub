@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, CheckCircle, XCircle, Info } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 
 interface PermissionRequest {
   id: number | string;
@@ -57,7 +57,7 @@ export function PermissionDialog({ request, onResponse, onClose }: PermissionDia
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-border-dark">
           <div className="flex items-center gap-3">
             <div className="size-8 rounded-lg bg-amber-500/20 flex items-center justify-center">
-              <Info className="size-4 text-amber-500" />
+              <Codicon name="info" className="text-[16px] text-amber-500" />
             </div>
             <h3 className="font-semibold text-slate-900 dark:text-white">
               Permission Request
@@ -67,7 +67,7 @@ export function PermissionDialog({ request, onResponse, onClose }: PermissionDia
             onClick={onClose}
             className="size-8 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center transition-colors"
           >
-            <X className="size-4 text-slate-500" />
+            <Codicon name="close" className="text-slate-500" />
           </button>
         </div>
 
@@ -115,7 +115,7 @@ export function PermissionDialog({ request, onResponse, onClose }: PermissionDia
                       : "border-slate-300 dark:border-slate-600"
                   }`}>
                     {isSelected && (
-                      <CheckCircle className="size-3 text-white" />
+                      <Codicon name="pass-filled" className="text-[12px] text-white" />
                     )}
                   </div>
                   <span className="text-sm font-medium text-slate-900 dark:text-white">
@@ -169,9 +169,9 @@ export function PermissionDialog({ request, onResponse, onClose }: PermissionDia
             ) : (
               <>
                 {selectedOption === "reject" ? (
-                  <XCircle className="size-4" />
+                  <Codicon name="error" />
                 ) : (
-                  <CheckCircle className="size-4" />
+                  <Codicon name="pass-filled" />
                 )}
                 {request.options.find((o) => o.optionId === selectedOption)?.name || "Submit"}
               </>

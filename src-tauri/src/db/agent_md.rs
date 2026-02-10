@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::db::migrations::get_agents_dir;
+use crate::db::migrations::{get_agents_dir, get_base_dir};
 use crate::error::{AppError, AppResult};
 use crate::models::agent::AgentConfig;
 
@@ -42,6 +42,7 @@ description: "{description}"
 model: "{model}"
 temperature: {temperature}
 max_tokens: {max_tokens}
+max_concurrency: {max_concurrency}
 capabilities: [{capabilities}]
 acp_command: "{acp_command}"
 acp_args: [{acp_args}]
@@ -57,6 +58,7 @@ is_control_hub: {is_control_hub}
         model = agent.model,
         temperature = agent.temperature,
         max_tokens = agent.max_tokens,
+        max_concurrency = agent.max_concurrency,
         capabilities = caps_str,
         acp_command = agent.acp_command.as_deref().unwrap_or(""),
         acp_args = args_str,
@@ -90,6 +92,9 @@ pub fn read_agent_md(path: &str) -> AppResult<AgentConfig> {
     let max_tokens: i64 = extract_field(&frontmatter, "max_tokens")
         .and_then(|v| v.parse().ok())
         .unwrap_or(4096);
+    let max_concurrency: i64 = extract_field(&frontmatter, "max_concurrency")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
     let is_control_hub: bool = extract_field(&frontmatter, "is_control_hub")
         .and_then(|v| v.parse().ok())
         .unwrap_or(false);
@@ -123,6 +128,8 @@ pub fn read_agent_md(path: &str) -> AppResult<AgentConfig> {
         acp_args_json,
         is_control_hub,
         md_file_path: Some(path.to_string()),
+        max_concurrency,
+        available_models_json: None,
         created_at: String::new(),
         updated_at: String::new(),
     })
@@ -142,6 +149,56 @@ pub fn sync_all_to_md(agents: &[AgentConfig]) -> AppResult<Vec<PathBuf>> {
 pub fn delete_agent_md(agent_id: &str) {
     let file_path = get_agents_dir().join(format!("{}.md", agent_id));
     let _ = std::fs::remove_file(file_path);
+}
+
+/// Write the agents registry file at ~/.iaagenthub/agents_registry.md
+pub fn write_agents_registry(agents: &[AgentConfig]) -> AppResult<PathBuf> {
+    let base_dir = get_base_dir();
+    std::fs::create_dir_all(&base_dir)
+        .map_err(|e| AppError::Io(e))?;
+
+    let file_path = base_dir.join("agents_registry.md");
+
+    let mut content = String::from("# Agents Registry\n\n");
+
+    for agent in agents {
+        let caps: Vec<String> = serde_json::from_str(&agent.capabilities_json)
+            .unwrap_or_default();
+        let caps_str = if caps.is_empty() {
+            "none".to_string()
+        } else {
+            caps.join(", ")
+        };
+
+        content.push_str(&format!(
+            "## Agent: {name}\n\
+             - **ID**: {id}\n\
+             - **Description**: {description}\n\
+             - **Model**: {model}\n\
+             - **Max Concurrency**: {max_concurrency}\n\
+             - **Capabilities**: [{capabilities}]\n\
+             - **Is Control Hub**: {is_control_hub}\n\n",
+            name = agent.name,
+            id = agent.id,
+            description = if agent.description.is_empty() { "N/A" } else { &agent.description },
+            model = agent.model,
+            max_concurrency = agent.max_concurrency,
+            capabilities = caps_str,
+            is_control_hub = agent.is_control_hub,
+        ));
+    }
+
+    std::fs::write(&file_path, content)
+        .map_err(|e| AppError::Io(e))?;
+
+    Ok(file_path)
+}
+
+/// Read the agents registry file as raw text.
+pub fn read_agents_registry() -> AppResult<String> {
+    let file_path = get_base_dir().join("agents_registry.md");
+    std::fs::read_to_string(&file_path)
+        .map_err(|e| AppError::Io(e))
 }
 
 fn parse_frontmatter(content: &str) -> Option<(String, String)> {

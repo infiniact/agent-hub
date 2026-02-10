@@ -10,11 +10,102 @@ use serde::{Deserialize, Serialize};
 
 use crate::acp::manager::AgentProcess;
 
+/// Action the user can take when orchestration awaits confirmation
+#[derive(Debug)]
+pub enum ConfirmationAction {
+    /// Proceed with summarization
+    Confirm,
+    /// Re-run a specific agent by ID
+    RegenerateAgent(String),
+    /// Re-run all agents
+    RegenerateAll,
+}
+
+/// Key for a pending orchestration permission request: (task_run_id, request_id)
+pub type OrchPermissionKey = (String, String);
+
+/// ACP session state following the ACP protocol specification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AcpSessionState {
+    /// Session has been created but not yet loaded/used
+    #[serde(rename = "new")]
+    New,
+    /// Session is active and ready for prompts
+    #[serde(rename = "active")]
+    Active,
+    /// Session has been ended
+    #[serde(rename = "ended")]
+    Ended,
+}
+
+impl Default for AcpSessionState {
+    fn default() -> Self {
+        Self::New
+    }
+}
+
+impl std::fmt::Display for AcpSessionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcpSessionState::New => write!(f, "new"),
+            AcpSessionState::Active => write!(f, "active"),
+            AcpSessionState::Ended => write!(f, "ended"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpSessionInfo {
+    /// Internal session ID (from our DB)
     pub session_id: String,
+    /// Agent ID that owns this session
     pub agent_id: String,
+    /// ACP protocol session ID (from agent)
     pub acp_session_id: String,
+    /// Current state of the session following ACP spec
+    #[serde(default)]
+    pub state: AcpSessionState,
+    /// Timestamp when session was created
+    pub created_at: String,
+    /// Timestamp when session was last used
+    pub last_used_at: String,
+}
+
+impl AcpSessionInfo {
+    /// Create a new session info with default state
+    pub fn new(session_id: String, agent_id: String, acp_session_id: String) -> Self {
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        Self {
+            session_id,
+            agent_id,
+            acp_session_id,
+            state: AcpSessionState::New,
+            created_at: now.clone(),
+            last_used_at: now,
+        }
+    }
+
+    /// Mark session as active (after first prompt or successful load)
+    pub fn mark_active(&mut self) {
+        self.state = AcpSessionState::Active;
+        self.last_used_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+
+    /// Mark session as ended
+    pub fn mark_ended(&mut self) {
+        self.state = AcpSessionState::Ended;
+        self.last_used_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+
+    /// Update last used timestamp
+    pub fn touch(&mut self) {
+        self.last_used_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+
+    /// Check if session is usable for prompts
+    pub fn is_usable(&self) -> bool {
+        self.state == AcpSessionState::New || self.state == AcpSessionState::Active
+    }
 }
 
 pub struct AppState {
@@ -30,6 +121,12 @@ pub struct AppState {
     pub discovered_agents: Arc<Mutex<Vec<crate::models::agent::DiscoveredAgent>>>,
     /// Active orchestration task runs with cancellation tokens
     pub active_task_runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// Per-agent cancellation tokens: (task_run_id, agent_id) -> CancellationToken
+    pub agent_cancellations: Arc<Mutex<HashMap<(String, String), CancellationToken>>>,
+    /// Pending confirmation channels: task_run_id -> oneshot sender
+    pub pending_confirmations: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConfirmationAction>>>>,
+    /// Pending orchestration permission channels: (task_run_id, request_id) -> oneshot sender(option_id)
+    pub pending_orch_permissions: Arc<Mutex<HashMap<OrchPermissionKey, tokio::sync::oneshot::Sender<String>>>>,
 }
 
 impl AppState {
@@ -41,6 +138,9 @@ impl AppState {
             acp_sessions: Arc::new(Mutex::new(HashMap::new())),
             discovered_agents: Arc::new(Mutex::new(Vec::new())),
             active_task_runs: Arc::new(Mutex::new(HashMap::new())),
+            agent_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            pending_orch_permissions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -55,6 +155,9 @@ impl Clone for AppState {
             acp_sessions: Arc::clone(&self.acp_sessions),
             discovered_agents: Arc::clone(&self.discovered_agents),
             active_task_runs: Arc::clone(&self.active_task_runs),
+            agent_cancellations: Arc::clone(&self.agent_cancellations),
+            pending_confirmations: Arc::clone(&self.pending_confirmations),
+            pending_orch_permissions: Arc::clone(&self.pending_orch_permissions),
         }
     }
 }

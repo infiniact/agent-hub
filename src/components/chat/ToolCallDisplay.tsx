@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, CheckCircle, XCircle, Wrench, ChevronDown, ChevronRight } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 import { useState } from "react";
 
 interface ToolCallProps {
@@ -57,21 +57,21 @@ export function ToolCallDisplay({ toolCall }: ToolCallProps) {
         onClick={() => hasDetails && setExpanded(!expanded)}
       >
         {isRunning && !isCompleted && (
-          <Loader2 className="size-3.5 text-primary animate-spin flex-none" />
+          <Codicon name="loading" className="text-[14px] text-primary codicon-modifier-spin flex-none" />
         )}
         {isCompleted && (
-          <CheckCircle className="size-3.5 text-emerald-400 flex-none" />
+          <Codicon name="pass-filled" className="text-[14px] text-emerald-400 flex-none" />
         )}
         {isFailed && (
-          <XCircle className="size-3.5 text-rose-400 flex-none" />
+          <Codicon name="error" className="text-[14px] text-rose-400 flex-none" />
         )}
         <span className="font-mono font-medium text-slate-700 dark:text-gray-300 truncate">
           {description}
         </span>
         {hasDetails && (
           expanded
-            ? <ChevronDown className="size-3 text-slate-400 flex-none ml-auto" />
-            : <ChevronRight className="size-3 text-slate-400 flex-none ml-auto" />
+            ? <Codicon name="chevron-down" className="text-[12px] text-slate-400 flex-none ml-auto" />
+            : <Codicon name="chevron-right" className="text-[12px] text-slate-400 flex-none ml-auto" />
         )}
       </div>
       {expanded && (

@@ -1,39 +1,26 @@
 "use client";
 
 import { useAgentStore } from "@/stores/agentStore";
-import {
-  Code,
-  Terminal,
-  Brain,
-  Shield,
-  Rocket,
-  Database,
-  Sparkles,
-  Landmark,
-  History,
-  Play,
-  Pencil,
-  Crown,
-} from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { useState, useRef, useEffect } from "react";
 
 const iconOptions = [
-  { name: "code", Icon: Code },
-  { name: "terminal", Icon: Terminal },
-  { name: "psychology", Icon: Brain },
-  { name: "rocket_launch", Icon: Rocket },
-  { name: "database", Icon: Database },
-  { name: "shield", Icon: Shield },
-  { name: "auto_awesome", Icon: Sparkles },
-  { name: "architecture", Icon: Landmark },
+  { name: "code", icon: "code" },
+  { name: "terminal", icon: "terminal" },
+  { name: "psychology", icon: "lightbulb" },
+  { name: "rocket_launch", icon: "rocket" },
+  { name: "database", icon: "database" },
+  { name: "shield", icon: "shield" },
+  { name: "auto_awesome", icon: "sparkle" },
+  { name: "architecture", icon: "library" },
 ];
 
 function getAgentIcon(iconName: string) {
   const found = iconOptions.find((o) => o.name === iconName);
-  const Icon = found?.Icon ?? Code;
-  return <Icon className="size-6" />;
+  const codiconName = found?.icon ?? "code";
+  return <Codicon name={codiconName} className="text-[24px]" />;
 }
 
 export function AgentIdentity() {
@@ -45,7 +32,21 @@ export function AgentIdentity() {
   const [iconDropdownOpen, setIconDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
+  // Inline editing states
+  const [editingName, setEditingName] = useState(false);
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const [draftDesc, setDraftDesc] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const descInputRef = useRef<HTMLInputElement>(null);
+
   const agent = agents.find((a) => a.id === selectedAgentId);
+
+  // Reset editing state when switching agents
+  useEffect(() => {
+    setEditingName(false);
+    setEditingDesc(false);
+  }, [selectedAgentId]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -56,6 +57,14 @@ export function AgentIdentity() {
     document.addEventListener("click", handler);
     return () => document.removeEventListener("click", handler);
   }, []);
+
+  // Auto-focus inputs when editing starts
+  useEffect(() => {
+    if (editingName) nameInputRef.current?.focus();
+  }, [editingName]);
+  useEffect(() => {
+    if (editingDesc) descInputRef.current?.focus();
+  }, [editingDesc]);
 
   const name = agent?.name ?? "Coder Bot v1.2";
   const description =
@@ -75,6 +84,32 @@ export function AgentIdentity() {
     }
   };
 
+  const startEditName = () => {
+    setDraftName(name);
+    setEditingName(true);
+  };
+
+  const saveName = () => {
+    const trimmed = draftName.trim();
+    if (agent && trimmed && trimmed !== name) {
+      updateAgent(agent.id, { name: trimmed });
+    }
+    setEditingName(false);
+  };
+
+  const startEditDesc = () => {
+    setDraftDesc(description);
+    setEditingDesc(true);
+  };
+
+  const saveDesc = () => {
+    const trimmed = draftDesc.trim();
+    if (agent && trimmed !== description) {
+      updateAgent(agent.id, { description: trimmed });
+    }
+    setEditingDesc(false);
+  };
+
   return (
     <div className="flex items-center justify-between px-8 py-5 flex-none">
       <div className="flex items-center gap-4">
@@ -85,7 +120,7 @@ export function AgentIdentity() {
           >
             {getAgentIcon(icon)}
             <div className="absolute inset-0 bg-primary/10 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-              <Pencil className="size-3 text-primary" />
+              <Codicon name="edit" className="text-[12px] text-primary" />
             </div>
           </button>
           {iconDropdownOpen && (
@@ -94,7 +129,7 @@ export function AgentIdentity() {
                 Choose Identity
               </p>
               <div className="grid grid-cols-4 gap-2">
-                {iconOptions.map(({ name: iconName, Icon }) => (
+                {iconOptions.map(({ name: iconName, icon: codiconName }) => (
                   <button
                     key={iconName}
                     className="size-8 rounded flex items-center justify-center hover:bg-primary/20 text-slate-500 dark:text-gray-400 hover:text-primary transition-colors"
@@ -105,29 +140,79 @@ export function AgentIdentity() {
                       setIconDropdownOpen(false);
                     }}
                   >
-                    <Icon className="size-5" />
+                    <Codicon name={codiconName} className="text-[20px]" />
                   </button>
                 ))}
               </div>
             </div>
           )}
         </div>
-        <div>
+        <div className="min-w-0">
           <div className="flex items-center gap-3 mb-1">
-            <h2 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">
-              {name}
-            </h2>
+            {editingName ? (
+              <div className="flex items-center gap-1.5">
+                <input
+                  ref={nameInputRef}
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onBlur={saveName}
+                  onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing) return;
+                    if (e.key === "Enter") saveName();
+                    if (e.key === "Escape") setEditingName(false);
+                  }}
+                  className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight bg-transparent border-b-2 border-primary outline-none px-0"
+                />
+                <button onClick={saveName} className="text-primary hover:text-primary/80">
+                  <Codicon name="check" />
+                </button>
+              </div>
+            ) : (
+              <h2
+                onClick={startEditName}
+                className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight cursor-pointer hover:text-primary/80 transition-colors"
+                title="Click to edit"
+              >
+                {name}
+              </h2>
+            )}
             <Badge variant="primary">
               {status === "Running" ? "ACTIVE" : status.toUpperCase()}
             </Badge>
             {isHub && (
               <Badge variant="primary">
-                <Crown className="size-3 mr-1" />
+                <Codicon name="star-full" className="text-[12px] mr-1" />
                 CONTROL HUB
               </Badge>
             )}
           </div>
-          <p className="text-sm text-slate-500 dark:text-gray-400">{description}</p>
+          {editingDesc ? (
+            <div className="flex items-center gap-1.5">
+              <input
+                ref={descInputRef}
+                value={draftDesc}
+                onChange={(e) => setDraftDesc(e.target.value)}
+                onBlur={saveDesc}
+                onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing) return;
+                  if (e.key === "Enter") saveDesc();
+                  if (e.key === "Escape") setEditingDesc(false);
+                }}
+                className="text-sm text-slate-500 dark:text-gray-400 bg-transparent border-b border-primary outline-none w-full px-0"
+              />
+              <button onClick={saveDesc} className="text-primary hover:text-primary/80 shrink-0">
+                <Codicon name="check" className="text-[14px]" />
+              </button>
+            </div>
+          ) : (
+            <p
+              onClick={startEditDesc}
+              className="text-sm text-slate-500 dark:text-gray-400 cursor-pointer hover:text-slate-700 dark:hover:text-gray-300 transition-colors"
+              title="Click to edit"
+            >
+              {description}
+            </p>
+          )}
         </div>
       </div>
       <div className="flex gap-3">
@@ -135,13 +220,13 @@ export function AgentIdentity() {
           variant={isHub ? "primary" : "secondary"}
           onClick={handleToggleHub}
         >
-          <Crown className="size-4" /> {isHub ? "Hub Active" : "Set as Hub"}
+          <Codicon name="star-full" /> {isHub ? "Hub Active" : "Set as Hub"}
         </Button>
         <Button variant="secondary">
-          <History className="size-4" /> Logs
+          <Codicon name="history" /> Logs
         </Button>
         <Button variant="primary">
-          <Play className="size-4" /> Run Diagnostics
+          <Codicon name="play" /> Run Diagnostics
         </Button>
       </div>
     </div>

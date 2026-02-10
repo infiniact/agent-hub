@@ -25,6 +25,9 @@ function applyThemeClass(theme: 'dark' | 'light') {
       document.documentElement.classList.remove('dark');
     }
   }
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem('theme', theme);
+  }
 }
 
 export const useSettingsStore = create<SettingsState & SettingsActions>((set, get) => ({
@@ -52,6 +55,15 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
       });
     } catch (error) {
       console.error('Failed to load settings:', error);
+      // Fallback: read theme from localStorage when Tauri backend is unavailable
+      if (typeof localStorage !== 'undefined') {
+        const stored = localStorage.getItem('theme');
+        if (stored === 'light' || stored === 'dark') {
+          applyThemeClass(stored);
+          set({ theme: stored, loaded: true });
+          return;
+        }
+      }
       set({ loaded: true });
     }
   },

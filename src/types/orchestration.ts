@@ -3,7 +3,7 @@ export interface TaskRun {
   title: string;
   user_prompt: string;
   control_hub_agent_id: string;
-  status: 'pending' | 'analyzing' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'analyzing' | 'running' | 'awaiting_confirmation' | 'completed' | 'failed' | 'cancelled';
   task_plan_json: string | null;
   result_summary: string | null;
   total_tokens_in: number;
@@ -48,9 +48,31 @@ export interface AgentTrackingInfo {
   agentId: string;
   agentName: string;
   model: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   tokensIn: number;
   tokensOut: number;
   durationMs: number;
   streamedContent: string;
+  acpSessionId?: string;
+  output?: string;
+  toolCalls?: OrchToolCall[];
+  assignmentId?: string;
+}
+
+export interface OrchToolCall {
+  toolCallId: string;
+  name: string;
+  title?: string;
+  status: string;
+  rawInput?: any;
+  rawOutput?: any;
+}
+
+export interface OrchPermissionRequest {
+  taskRunId: string;
+  agentId: string;
+  requestId: number | string;
+  sessionId: string;
+  toolCall?: { toolCallId: string; title: string; rawInput?: any };
+  options: Array<{ optionId: string; name: string; kind: string }>;
 }

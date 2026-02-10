@@ -1,6 +1,6 @@
 "use client";
 
-import { User, Bot } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 import type { ChatMessage as ChatMessageType } from "@/types/chat";
 import { ToolCallDisplay } from "./ToolCallDisplay";
 import { MarkdownContent } from "./MarkdownContent";
@@ -47,7 +47,7 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
           </div>
         </div>
         <div className="size-8 rounded-full border border-slate-300 dark:border-border-dark flex-none bg-slate-200 dark:bg-surface-dark flex items-center justify-center">
-          <User className="size-4 text-slate-500" />
+          <Codicon name="account" className="text-slate-500" />
         </div>
       </div>
     );
@@ -56,7 +56,7 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
   return (
     <div className="flex gap-4 pr-12">
       <div className="size-8 rounded-full flex-none bg-primary/20 flex items-center justify-center">
-        <Bot className="size-4 text-primary" />
+        <Codicon name="hubot" className="text-primary" />
       </div>
       <div className="flex flex-col gap-2 max-w-[80%]">
         <div className="bg-white dark:bg-surface-dark text-slate-900 dark:text-gray-200 px-5 py-3 rounded-2xl rounded-tl-sm border border-slate-200 dark:border-border-dark shadow-sm">

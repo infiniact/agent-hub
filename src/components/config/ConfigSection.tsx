@@ -1,7 +1,6 @@
 "use client";
 
 import { AgentIdentity } from "./AgentIdentity";
-import { ExecutionMode } from "./ExecutionMode";
 import { ParameterWizard } from "./ParameterWizard";
 import { SystemPromptEditor } from "./SystemPromptEditor";
 import { CapabilitiesPanel } from "./CapabilitiesPanel";
@@ -22,7 +21,6 @@ export function ConfigSection() {
       </div>
       <div className="p-8 space-y-10">
         <div className="max-w-6xl mx-auto space-y-10">
-          <ExecutionMode />
           <ParameterWizard />
           <div className="grid grid-cols-12 gap-8">
             <div className="col-span-12 lg:col-span-7 flex flex-col gap-8">

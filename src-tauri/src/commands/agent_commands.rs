@@ -32,6 +32,10 @@ pub async fn create_agent(
             let path_str = md_path.to_string_lossy().to_string();
             let _ = agent_repo::update_agent_md_path(&state, &agent.id, &path_str);
         }
+        // Regenerate agents registry
+        if let Ok(all_agents) = agent_repo::list_agents(&state) {
+            let _ = agent_md::write_agents_registry(&all_agents);
+        }
         agent_repo::get_agent(&state, &agent.id)
     })
     .await
@@ -52,6 +56,10 @@ pub async fn update_agent(
             let path_str = md_path.to_string_lossy().to_string();
             let _ = agent_repo::update_agent_md_path(&state, &agent.id, &path_str);
         }
+        // Regenerate agents registry
+        if let Ok(all_agents) = agent_repo::list_agents(&state) {
+            let _ = agent_md::write_agents_registry(&all_agents);
+        }
         agent_repo::get_agent(&state, &agent.id)
     })
     .await
@@ -63,7 +71,12 @@ pub async fn delete_agent(state: tauri::State<'_, AppState>, id: String) -> AppR
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         agent_md::delete_agent_md(&id);
-        agent_repo::delete_agent(&state, &id)
+        agent_repo::delete_agent(&state, &id)?;
+        // Regenerate agents registry
+        if let Ok(all_agents) = agent_repo::list_agents(&state) {
+            let _ = agent_md::write_agents_registry(&all_agents);
+        }
+        Ok(())
     })
     .await
     .map_err(|e| crate::error::AppError::Internal(e.to_string()))?

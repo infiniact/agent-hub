@@ -6,12 +6,19 @@ import type {
   UpdateAgentRequest,
 } from '@/types/agent';
 import { useChatStore } from '@/stores/chatStore';
+import { useAcpStore } from '@/stores/acpStore';
 
 interface AgentState {
   agents: AgentConfig[];
   selectedAgentId: string | null;
   controlHubAgentId: string | null;
   loading: boolean;
+  /** Whether the ACP agent process is being initialized */
+  agentInitializing: boolean;
+  /** Error message from the last agent initialization attempt */
+  agentError: string | null;
+  /** Agent IDs that have been successfully initialized and are ready */
+  readyAgentIds: string[];
 }
 
 interface AgentActions {
@@ -22,6 +29,10 @@ interface AgentActions {
   deleteAgent: (id: string) => Promise<void>;
   setControlHub: (id: string) => Promise<AgentConfig>;
   getControlHub: () => Promise<void>;
+  /** Ensure the ACP agent is spawned, initialized, and models are fetched */
+  ensureAgentReady: (agentId: string, forceRefresh?: boolean) => Promise<void>;
+  /** Force re-fetch models from the agent (ignores cache) */
+  refreshModels: (agentId: string) => Promise<void>;
 }
 
 export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
@@ -29,6 +40,9 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
   selectedAgentId: null,
   controlHubAgentId: null,
   loading: false,
+  agentInitializing: false,
+  agentError: null,
+  readyAgentIds: [],
 
   fetchAgents: async () => {
     set({ loading: true });
@@ -45,7 +59,7 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
 
   selectAgent: async (id) => {
     console.log('[AgentStore] selectAgent called:', id);
-    set({ selectedAgentId: id });
+    set({ selectedAgentId: id, agentError: null, agentInitializing: false });
 
     // Clear the current chat state when switching agents
     const chatStore = useChatStore.getState();
@@ -55,6 +69,34 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
     if (id) {
       await chatStore.fetchSessions(id);
       console.log('[AgentStore] Sessions fetched for agent:', id);
+
+      // Load cached models from DB immediately (before live fetch)
+      const agent = get().agents.find((a) => a.id === id);
+      if (agent?.acp_command) {
+        const acpStore = useAcpStore.getState();
+        if (agent.available_models_json) {
+          try {
+            const cached: string[] = JSON.parse(agent.available_models_json);
+            if (cached.length > 0) {
+              console.log('[AgentStore] Loading cached models:', cached.length);
+              acpStore.updateDiscoveredAgentModels(agent.acp_command, cached);
+            } else {
+              // Clear model list so previous agent's models don't leak
+              acpStore.updateDiscoveredAgentModels(agent.acp_command, []);
+            }
+          } catch {
+            acpStore.updateDiscoveredAgentModels(agent.acp_command, []);
+          }
+        } else {
+          // No cached models — clear so previous agent's models don't show
+          acpStore.updateDiscoveredAgentModels(agent.acp_command, []);
+        }
+      }
+
+      // Ensure the agent process is running and models are loaded
+      get().ensureAgentReady(id).catch((e) => {
+        console.warn('[AgentStore] ensureAgentReady failed (non-blocking):', e);
+      });
     } else {
       // Clear sessions list if no agent selected
       useChatStore.setState({ sessions: [] });
@@ -93,6 +135,7 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
         agents: state.agents.filter((a) => a.id !== id),
         selectedAgentId: state.selectedAgentId === id ? null : state.selectedAgentId,
         controlHubAgentId: state.controlHubAgentId === id ? null : state.controlHubAgentId,
+        readyAgentIds: state.readyAgentIds.filter((rid) => rid !== id),
       }));
     } catch (error) {
       console.error('Failed to delete agent:', error);
@@ -124,5 +167,99 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
     } catch (error) {
       console.error('Failed to get control hub:', error);
     }
+  },
+
+  ensureAgentReady: async (agentId, forceRefresh) => {
+    if (!forceRefresh && get().readyAgentIds.includes(agentId)) {
+      console.log('[AgentStore] Agent already ready, skipping:', agentId);
+      return;
+    }
+
+    const agent = get().agents.find((a) => a.id === agentId);
+    if (!agent || !agent.acp_command) {
+      console.log('[AgentStore] Agent has no ACP command, skipping initialization');
+      return;
+    }
+
+    // Only show the "Loading models…" spinner when there are no cached models.
+    // If models are already cached we still connect in the background but the UI
+    // shows the cached list immediately.
+    let hasCachedModels = false;
+    try {
+      if (agent.available_models_json) {
+        const cached: string[] = JSON.parse(agent.available_models_json);
+        hasCachedModels = cached.length > 0;
+      }
+    } catch { /* ignore */ }
+
+    console.log('[AgentStore] Ensuring agent ready:', agentId, 'forceRefresh:', !!forceRefresh, 'hasCachedModels:', hasCachedModels);
+    if (!hasCachedModels) {
+      set({ agentInitializing: true, agentError: null });
+    } else {
+      set({ agentError: null });
+    }
+
+    try {
+      const result = await tauriInvoke<{ status: string; models: { model_id: string; name: string }[] }>(
+        'ensure_agent_ready',
+        { agentId, forceRefresh: forceRefresh || false }
+      );
+      console.log('[AgentStore] Agent ready:', result.status, 'models:', result.models.length);
+
+      const acpStore = useAcpStore.getState();
+      const modelIds = result.models.map((m) => m.model_id);
+      acpStore.updateDiscoveredAgentModels(agent.acp_command!, modelIds);
+
+      if (modelIds.length > 0) {
+        const currentModel = agent.model;
+        const needsModelUpdate = !modelIds.includes(currentModel);
+        await get().updateAgent(agentId, {
+          available_models_json: JSON.stringify(modelIds),
+          ...(needsModelUpdate ? { model: modelIds[0] } : {}),
+        });
+        console.log(
+          '[AgentStore] Models persisted:',
+          modelIds.length,
+          needsModelUpdate ? `auto-selected: ${modelIds[0]}` : `kept: ${currentModel}`
+        );
+      }
+
+      set((s) => ({
+        readyAgentIds: s.readyAgentIds.includes(agentId)
+          ? s.readyAgentIds
+          : [...s.readyAgentIds, agentId],
+      }));
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('[AgentStore] Failed to ensure agent ready:', errorMessage);
+      if (get().selectedAgentId === agentId) {
+        set({ agentError: errorMessage });
+      }
+      set((s) => ({
+        readyAgentIds: s.readyAgentIds.filter((id) => id !== agentId),
+      }));
+    } finally {
+      if (get().selectedAgentId === agentId) {
+        set({ agentInitializing: false });
+      }
+    }
+  },
+
+  refreshModels: async (agentId) => {
+    const agent = get().agents.find((a) => a.id === agentId);
+    if (!agent || !agent.acp_command) return;
+
+    console.log('[AgentStore] Refreshing models for agent:', agentId);
+
+    // Clear ready state so ensureAgentReady runs fresh
+    set((s) => ({ readyAgentIds: s.readyAgentIds.filter((id) => id !== agentId) }));
+
+    // Clear cached models so UI shows loading state
+    const acpStore = useAcpStore.getState();
+    acpStore.updateDiscoveredAgentModels(agent.acp_command, []);
+    await get().updateAgent(agentId, { available_models_json: '[]' });
+
+    // Re-run full ensureAgentReady with force refresh to get fresh models via session/new
+    await get().ensureAgentReady(agentId, true);
   },
 }));

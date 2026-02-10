@@ -3,7 +3,7 @@ use crate::db::{agent_repo, task_run_repo};
 use crate::error::{AppError, AppResult};
 use crate::models::agent::AgentConfig;
 use crate::models::task_run::{CreateTaskRunRequest, TaskAssignment, TaskRun};
-use crate::state::AppState;
+use crate::state::{AppState, ConfirmationAction};
 use tokio_util::sync::CancellationToken;
 
 #[tauri::command(rename_all = "camelCase")]
@@ -110,4 +110,84 @@ pub async fn get_task_assignments(
     tokio::task::spawn_blocking(move || task_run_repo::list_assignments_for_run(&state, &task_run_id))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
+}
+
+/// User confirms orchestration results — proceed to summary
+#[tauri::command(rename_all = "camelCase")]
+pub async fn confirm_orchestration(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+) -> AppResult<()> {
+    let mut confirmations = state.pending_confirmations.lock().await;
+    if let Some(tx) = confirmations.remove(&task_run_id) {
+        let _ = tx.send(ConfirmationAction::Confirm);
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!(
+            "No pending confirmation for task run {}",
+            task_run_id
+        )))
+    }
+}
+
+/// User requests re-running a single agent, or all agents if agent_id is "__all__"
+#[tauri::command(rename_all = "camelCase")]
+pub async fn regenerate_agent(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+    agent_id: String,
+) -> AppResult<()> {
+    let mut confirmations = state.pending_confirmations.lock().await;
+    if let Some(tx) = confirmations.remove(&task_run_id) {
+        let action = if agent_id == "__all__" {
+            ConfirmationAction::RegenerateAll
+        } else {
+            ConfirmationAction::RegenerateAgent(agent_id)
+        };
+        let _ = tx.send(action);
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!(
+            "No pending confirmation for task run {}",
+            task_run_id
+        )))
+    }
+}
+
+/// User responds to a permission request during orchestration
+#[tauri::command(rename_all = "camelCase")]
+pub async fn respond_orch_permission(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+    _agent_id: String,
+    request_id: String,
+    option_id: String,
+) -> AppResult<()> {
+    let perm_key = (task_run_id.clone(), request_id.clone());
+    let mut perms = state.pending_orch_permissions.lock().await;
+    if let Some(tx) = perms.remove(&perm_key) {
+        let _ = tx.send(option_id);
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!(
+            "No pending permission for task run {}, request {}",
+            task_run_id, request_id
+        )))
+    }
+}
+
+/// Cancel a single agent within an orchestration task run
+#[tauri::command(rename_all = "camelCase")]
+pub async fn cancel_agent(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+    agent_id: String,
+) -> AppResult<()> {
+    let agent_cancels = state.agent_cancellations.lock().await;
+    if let Some(token) = agent_cancels.get(&(task_run_id.clone(), agent_id.clone())) {
+        token.cancel();
+        Ok(())
+    } else {
+        Err(AppError::NotFound("No active agent".into()))
+    }
 }

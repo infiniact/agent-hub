@@ -7,7 +7,7 @@ interface SliderProps {
   min: number;
   max: number;
   step: number;
-  label: string;
+  label?: string;
   onChange: (value: number) => void;
   formatValue?: (value: number) => string;
   className?: string;
@@ -25,12 +25,14 @@ export function Slider({
 }: SliderProps) {
   return (
     <div className={cn("flex-1 flex flex-col gap-1 max-w-md", className)}>
-      <div className="flex justify-between items-center">
-        <span className="text-xs font-medium text-slate-400">{label}</span>
-        <span className="text-xs font-mono text-primary">
-          {formatValue ? formatValue(value) : value}
-        </span>
-      </div>
+      {label && (
+        <div className="flex justify-between items-center">
+          <span className="text-xs font-medium text-slate-400">{label}</span>
+          <span className="text-xs font-mono text-primary">
+            {formatValue ? formatValue(value) : value}
+          </span>
+        </div>
+      )}
       <input
         type="range"
         min={min}

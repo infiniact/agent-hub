@@ -1,13 +1,22 @@
 use std::collections::HashMap;
 use tauri::Emitter;
 
-use crate::acp::{client, manager, transport};
-use crate::db::{agent_repo, task_run_repo};
+use crate::acp::{client, discovery, manager, provisioner, transport};
+use crate::db::{agent_md, agent_repo, task_run_repo};
 use crate::error::{AppError, AppResult};
 use crate::models::agent::AgentConfig;
 use crate::models::task_run::{TaskPlan, PlannedAssignment};
-use crate::state::AppState;
+use crate::state::{AppState, ConfirmationAction};
 use crate::db::migrations::{get_output_dir};
+use tokio_util::sync::CancellationToken;
+
+/// Result from sending a prompt to an agent, including metadata
+struct AgentPromptResult {
+    text: String,
+    tokens_in: i64,
+    tokens_out: i64,
+    acp_session_id: String,
+}
 
 /// Run a complete orchestration flow:
 /// 1. Validate control hub exists
@@ -24,11 +33,16 @@ pub async fn run_orchestration(
     let result = run_orchestration_inner(&app, &state, &task_run_id, &user_prompt).await;
 
     if let Err(e) = &result {
-        log::error!("Orchestration failed: {}", e);
-        let _ = app.emit("orchestration:error", &serde_json::json!({
+        let error_msg = e.to_string();
+        log::error!("Orchestration failed for {}: {}", task_run_id, error_msg);
+        let error_payload = serde_json::json!({
             "taskRunId": task_run_id,
-            "error": e.to_string(),
-        }));
+            "error": error_msg,
+        });
+        log::info!("Emitting orchestration:error payload: {}", error_payload);
+        if let Err(emit_err) = app.emit("orchestration:error", error_payload) {
+            log::error!("Failed to emit orchestration:error event: {}", emit_err);
+        }
         // Update status to failed
         let state_clone = state.clone();
         let id_clone = task_run_id.clone();
@@ -86,14 +100,18 @@ async fn run_orchestration_inner(
 
     let catalog = build_agent_catalog(&all_agents);
 
+    // Try to use agents registry file; fall back to inline catalog
+    let registry_content = agent_md::read_agents_registry()
+        .unwrap_or_else(|_| catalog.clone());
+
     // 4. Ensure hub agent process is running and get a plan
     ensure_agent_running(app, state, &hub_agent).await?;
 
     let plan_prompt = format!(
         r#"You are the orchestrator control hub. Analyze this task and assign it to the most appropriate agents.
 
-Available agents:
-{catalog}
+Available agents (from registry):
+{registry_content}
 
 User request: {user_prompt}
 
@@ -104,17 +122,19 @@ Rules:
 - Only use agent IDs from the available agents list above
 - Set sequence_order starting from 0 for parallel tasks, increment for sequential ones
 - depends_on should list agent_ids whose output is needed as input
-- If only one agent is needed, still return the assignments array with one entry"#
+- If only one agent is needed, still return the assignments array with one entry
+- Respect each agent's max_concurrency limit when assigning parallel tasks
+- Do not assign more concurrent instances of an agent than its max_concurrency allows"#
     );
 
-    let plan_response = send_prompt_to_agent(app, state, &hub_agent.id, &plan_prompt).await?;
+    let plan_response = send_prompt_to_agent(app, state, &hub_agent.id, &plan_prompt, Some(task_run_id), None).await?;
 
     if is_cancelled(state, task_run_id).await {
         return Ok(());
     }
 
     // Parse the plan
-    let plan = parse_task_plan(&plan_response)?;
+    let plan = parse_task_plan(&plan_response.text)?;
 
     // Store plan in DB
     {
@@ -147,8 +167,8 @@ Rules:
 
     // 6. Execute assignments in sequence order
     let mut agent_outputs: HashMap<String, String> = HashMap::new();
-    let total_tokens_in: i64 = 0;
-    let total_tokens_out: i64 = 0;
+    let mut total_tokens_in: i64 = 0;
+    let mut total_tokens_out: i64 = 0;
 
     // Group assignments by sequence_order
     let mut sequence_groups: HashMap<i64, Vec<&PlannedAssignment>> = HashMap::new();
@@ -162,152 +182,254 @@ Rules:
     let mut sorted_orders: Vec<i64> = sequence_groups.keys().copied().collect();
     sorted_orders.sort();
 
-    for order in sorted_orders {
-        let group = &sequence_groups[&order];
+    for order in &sorted_orders {
+        let group = &sequence_groups[order];
 
-        for planned in group {
-            if is_cancelled(state, task_run_id).await {
-                return Ok(());
-            }
+        // Build concurrency map: agent_id -> max_concurrency
+        let agent_concurrency: HashMap<String, i64> = all_agents
+            .iter()
+            .map(|a| (a.id.clone(), a.max_concurrency))
+            .collect();
 
-            // Look up agent name
-            let agent_name = all_agents
-                .iter()
-                .find(|a| a.id == planned.agent_id)
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| "Unknown".into());
+        // Split group into batches that respect max_concurrency per agent
+        let mut remaining: Vec<&PlannedAssignment> = group.iter().copied().collect();
 
-            let agent_model = all_agents
-                .iter()
-                .find(|a| a.id == planned.agent_id)
-                .map(|a| a.model.clone())
-                .unwrap_or_default();
+        while !remaining.is_empty() {
+            let mut batch: Vec<&PlannedAssignment> = Vec::new();
+            let mut batch_agent_count: HashMap<String, i64> = HashMap::new();
+            let mut deferred: Vec<&PlannedAssignment> = Vec::new();
 
-            // Build input: task description + outputs from dependencies
-            let mut input_parts = vec![planned.task_description.clone()];
-            for dep_id in &planned.depends_on {
-                if let Some(output) = agent_outputs.get(dep_id) {
-                    let dep_name = all_agents
-                        .iter()
-                        .find(|a| a.id == *dep_id)
-                        .map(|a| a.name.clone())
-                        .unwrap_or_else(|| "Previous agent".into());
-                    input_parts.push(format!("\n--- Output from {dep_name} ---\n{output}"));
+            for planned in remaining {
+                let max_conc = agent_concurrency.get(&planned.agent_id).copied().unwrap_or(1);
+                let current = batch_agent_count.get(&planned.agent_id).copied().unwrap_or(0);
+
+                if current < max_conc {
+                    *batch_agent_count.entry(planned.agent_id.clone()).or_insert(0) += 1;
+                    batch.push(planned);
+                } else {
+                    deferred.push(planned);
                 }
             }
-            let input_text = input_parts.join("\n");
 
-            // Create assignment record
-            let assignment_id = uuid::Uuid::new_v4().to_string();
-            {
-                let state_clone = state.clone();
-                let aid = assignment_id.clone();
-                let trid = task_run_id.to_string();
-                let agid = planned.agent_id.clone();
-                let aname = agent_name.clone();
-                let seq = planned.sequence_order;
-                let inp = input_text.clone();
-                tokio::task::spawn_blocking(move || {
-                    task_run_repo::create_task_assignment(
-                        &state_clone, &aid, &trid, &agid, &aname, seq, &inp,
-                    )
-                })
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))??;
-            }
+            // Execute batch assignments in parallel using tokio::JoinSet
+            let mut join_set = tokio::task::JoinSet::new();
 
-            // Mark as running
-            {
-                let state_clone = state.clone();
-                let aid = assignment_id.clone();
-                tokio::task::spawn_blocking(move || {
-                    task_run_repo::update_task_assignment(
-                        &state_clone, &aid, "running", None, None, 0, 0, 0, None,
-                    )
-                })
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))??;
-            }
+            for planned in &batch {
+                if is_cancelled(state, task_run_id).await {
+                    return Ok(());
+                }
 
-            let _ = app.emit("orchestration:agent_started", &serde_json::json!({
-                "taskRunId": task_run_id,
-                "assignmentId": assignment_id,
-                "agentId": planned.agent_id,
-                "agentName": agent_name,
-                "model": agent_model,
-                "sequenceOrder": planned.sequence_order,
-            }));
+                // Look up agent name
+                let agent_name = all_agents
+                    .iter()
+                    .find(|a| a.id == planned.agent_id)
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "Unknown".into());
 
-            // Ensure agent is running
-            let agent_config = all_agents
-                .iter()
-                .find(|a| a.id == planned.agent_id)
-                .ok_or_else(|| AppError::NotFound(format!("Agent {} not found", planned.agent_id)))?;
+                let agent_model = all_agents
+                    .iter()
+                    .find(|a| a.id == planned.agent_id)
+                    .map(|a| a.model.clone())
+                    .unwrap_or_default();
 
-            let assign_start = std::time::Instant::now();
-
-            match execute_agent_assignment(app, state, agent_config, &input_text, task_run_id).await {
-                Ok(output) => {
-                    let duration_ms = assign_start.elapsed().as_millis() as i64;
-                    agent_outputs.insert(planned.agent_id.clone(), output.clone());
-
-                    // Update assignment as completed
-                    {
-                        let state_clone = state.clone();
-                        let aid = assignment_id.clone();
-                        let out = output.clone();
-                        let model = agent_model.clone();
-                        tokio::task::spawn_blocking(move || {
-                            task_run_repo::update_task_assignment(
-                                &state_clone, &aid, "completed", Some(&out), Some(&model),
-                                0, 0, duration_ms, None,
-                            )
-                        })
-                        .await
-                        .map_err(|e| AppError::Internal(e.to_string()))??;
+                // Build input: task description + outputs from dependencies
+                let mut input_parts = vec![planned.task_description.clone()];
+                for dep_id in &planned.depends_on {
+                    if let Some(output) = agent_outputs.get(dep_id) {
+                        let dep_name = all_agents
+                            .iter()
+                            .find(|a| a.id == *dep_id)
+                            .map(|a| a.name.clone())
+                            .unwrap_or_else(|| "Previous agent".into());
+                        input_parts.push(format!("\n--- Output from {dep_name} ---\n{output}"));
                     }
-
-                    let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
-                        "taskRunId": task_run_id,
-                        "assignmentId": assignment_id,
-                        "agentId": planned.agent_id,
-                        "agentName": agent_name,
-                        "durationMs": assign_start.elapsed().as_millis() as i64,
-                        "status": "completed",
-                    }));
                 }
-                Err(e) => {
+                let input_text = input_parts.join("\n");
+
+                // Create assignment record
+                let assignment_id = uuid::Uuid::new_v4().to_string();
+                {
+                    let state_clone = state.clone();
+                    let aid = assignment_id.clone();
+                    let trid = task_run_id.to_string();
+                    let agid = planned.agent_id.clone();
+                    let aname = agent_name.clone();
+                    let seq = planned.sequence_order;
+                    let inp = input_text.clone();
+                    tokio::task::spawn_blocking(move || {
+                        task_run_repo::create_task_assignment(
+                            &state_clone, &aid, &trid, &agid, &aname, seq, &inp,
+                        )
+                    })
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))??;
+                }
+
+                // Mark as running
+                {
+                    let state_clone = state.clone();
+                    let aid = assignment_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        task_run_repo::update_task_assignment(
+                            &state_clone, &aid, "running", None, None, 0, 0, 0, None,
+                        )
+                    })
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))??;
+                }
+
+                // Get ACP session ID for this agent if it exists
+                let agent_acp_session_id = {
+                    let sessions = state.acp_sessions.lock().await;
+                    let orch_key = format!("orch:{}", planned.agent_id);
+                    sessions.get(&orch_key).map(|s| s.acp_session_id.clone())
+                };
+
+                let _ = app.emit("orchestration:agent_started", &serde_json::json!({
+                    "taskRunId": task_run_id,
+                    "assignmentId": assignment_id,
+                    "agentId": planned.agent_id,
+                    "agentName": agent_name,
+                    "model": agent_model,
+                    "sequenceOrder": planned.sequence_order,
+                    "acpSessionId": agent_acp_session_id,
+                }));
+
+                // Ensure agent is running
+                let agent_config = all_agents
+                    .iter()
+                    .find(|a| a.id == planned.agent_id)
+                    .ok_or_else(|| AppError::NotFound(format!("Agent {} not found", planned.agent_id)))?
+                    .clone();
+
+                // Spawn parallel task
+                let app_clone = app.clone();
+                let state_clone = state.clone();
+                let task_run_id_clone = task_run_id.to_string();
+                let agent_id_clone = planned.agent_id.clone();
+                let agent_name_clone = agent_name.clone();
+                let agent_model_clone = agent_model.clone();
+                let assignment_id_clone = assignment_id.clone();
+                let input_clone = input_text.clone();
+
+                // Create per-agent child token from the task-level token
+                let agent_cancel_token = {
+                    let task_tokens = state.active_task_runs.lock().await;
+                    task_tokens.get(task_run_id)
+                        .map(|t| t.child_token())
+                };
+                // Store the per-agent token
+                if let Some(ref token) = agent_cancel_token {
+                    let mut agent_cancels = state.agent_cancellations.lock().await;
+                    agent_cancels.insert(
+                        (task_run_id.to_string(), planned.agent_id.clone()),
+                        token.clone(),
+                    );
+                }
+
+                join_set.spawn(async move {
+                    let assign_start = std::time::Instant::now();
+
+                    let result = execute_agent_assignment(
+                        &app_clone,
+                        &state_clone,
+                        &agent_config,
+                        &input_clone,
+                        &task_run_id_clone,
+                        agent_cancel_token.as_ref(),
+                    ).await;
+
                     let duration_ms = assign_start.elapsed().as_millis() as i64;
-                    let err_msg = e.to_string();
 
-                    // Update assignment as failed
-                    {
-                        let state_clone = state.clone();
-                        let aid = assignment_id.clone();
-                        let em = err_msg.clone();
-                        tokio::task::spawn_blocking(move || {
-                            task_run_repo::update_task_assignment(
-                                &state_clone, &aid, "failed", None, None,
-                                0, 0, duration_ms, Some(&em),
-                            )
-                        })
-                        .await
-                        .map_err(|e| AppError::Internal(e.to_string()))??;
+                    match result {
+                        Ok(prompt_result) => {
+                            // Update assignment as completed
+                            {
+                                let state_clone2 = state_clone.clone();
+                                let aid = assignment_id_clone.clone();
+                                let out = prompt_result.text.clone();
+                                let model = agent_model_clone.clone();
+                                let ti = prompt_result.tokens_in;
+                                let to = prompt_result.tokens_out;
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    task_run_repo::update_task_assignment(
+                                        &state_clone2, &aid, "completed", Some(&out), Some(&model),
+                                        ti, to, duration_ms, None,
+                                    )
+                                }).await;
+                            }
+
+                            let _ = app_clone.emit("orchestration:agent_completed", &serde_json::json!({
+                                "taskRunId": task_run_id_clone,
+                                "assignmentId": assignment_id_clone,
+                                "agentId": agent_id_clone,
+                                "agentName": agent_name_clone,
+                                "durationMs": duration_ms,
+                                "status": "completed",
+                                "tokensIn": prompt_result.tokens_in,
+                                "tokensOut": prompt_result.tokens_out,
+                                "acpSessionId": prompt_result.acp_session_id,
+                                "output": prompt_result.text.clone(),
+                            }));
+
+                            (agent_id_clone, Ok(prompt_result))
+                        }
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            let is_cancelled = err_msg.contains("Agent cancelled");
+                            let status = if is_cancelled { "cancelled" } else { "failed" };
+
+                            // Update assignment as failed/cancelled
+                            {
+                                let state_clone2 = state_clone.clone();
+                                let aid = assignment_id_clone.clone();
+                                let em = err_msg.clone();
+                                let s = status.to_string();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    task_run_repo::update_task_assignment(
+                                        &state_clone2, &aid, &s, None, None,
+                                        0, 0, duration_ms, Some(&em),
+                                    )
+                                }).await;
+                            }
+
+                            let _ = app_clone.emit("orchestration:agent_completed", &serde_json::json!({
+                                "taskRunId": task_run_id_clone,
+                                "assignmentId": assignment_id_clone,
+                                "agentId": agent_id_clone,
+                                "agentName": agent_name_clone,
+                                "durationMs": duration_ms,
+                                "status": status,
+                                "error": &err_msg,
+                            }));
+
+                            log::warn!("Agent assignment failed for {}: {}", agent_name_clone, err_msg);
+
+                            (agent_id_clone, Err(err_msg))
+                        }
                     }
+                });
+            }
 
-                    let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
-                        "taskRunId": task_run_id,
-                        "assignmentId": assignment_id,
-                        "agentId": planned.agent_id,
-                        "agentName": agent_name,
-                        "durationMs": duration_ms,
-                        "status": "failed",
-                        "error": err_msg,
-                    }));
-
-                    log::warn!("Agent assignment failed: {}", e);
+            // Collect results from all parallel tasks
+            while let Some(join_result) = join_set.join_next().await {
+                match join_result {
+                    Ok((agent_id, Ok(prompt_result))) => {
+                        total_tokens_in += prompt_result.tokens_in;
+                        total_tokens_out += prompt_result.tokens_out;
+                        agent_outputs.insert(agent_id, prompt_result.text);
+                    }
+                    Ok((agent_id, Err(err_msg))) => {
+                        // Store error as output so downstream tasks can see it
+                        agent_outputs.insert(agent_id, format!("(Agent failed: {})", err_msg));
+                    }
+                    Err(e) => {
+                        log::error!("Join error in parallel batch: {}", e);
+                    }
                 }
             }
+
+            remaining = deferred;
         }
 
         // After each sequence group, send feedback to control hub
@@ -319,13 +441,286 @@ Rules:
             }));
 
             // We don't need to act on the feedback for now, just log it
-            if let Ok(response) = send_prompt_to_agent(app, state, &hub_agent.id, &feedback).await {
-                log::info!("Control Hub feedback: {}", response);
+            if let Ok(response) = send_prompt_to_agent(app, state, &hub_agent.id, &feedback, Some(task_run_id), None).await {
+                log::info!("Control Hub feedback: {}", response.text);
             }
         }
     }
 
-    // 7. Finalize — ask control hub for a summary
+    // 7. Await user confirmation before summarizing
+    // Emit awaiting_confirmation event with all agent outputs
+    let _ = app.emit("orchestration:awaiting_confirmation", &serde_json::json!({
+        "taskRunId": task_run_id,
+        "agentOutputs": &agent_outputs.iter().map(|(id, out)| {
+            let name = all_agents.iter().find(|a| a.id == *id)
+                .map(|a| a.name.as_str()).unwrap_or("Unknown");
+            serde_json::json!({ "agentId": id, "agentName": name, "output": out })
+        }).collect::<Vec<_>>(),
+    }));
+
+    // Update status to awaiting_confirmation
+    {
+        let state_clone = state.clone();
+        let id = task_run_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            task_run_repo::update_task_run_status(&state_clone, &id, "awaiting_confirmation")
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+    }
+
+    // Confirmation + regeneration loop
+    loop {
+        if is_cancelled(state, task_run_id).await {
+            return Ok(());
+        }
+
+        // Create a oneshot channel and store it
+        let (tx, rx) = tokio::sync::oneshot::channel::<ConfirmationAction>();
+        {
+            let mut confirmations = state.pending_confirmations.lock().await;
+            confirmations.insert(task_run_id.to_string(), tx);
+        }
+
+        // Wait for user action
+        let action = match tokio::time::timeout(
+            std::time::Duration::from_secs(3600), // 1 hour timeout
+            rx,
+        ).await {
+            Ok(Ok(action)) => action,
+            Ok(Err(_)) => ConfirmationAction::Confirm, // channel dropped
+            Err(_) => ConfirmationAction::Confirm,      // timeout
+        };
+
+        match action {
+            ConfirmationAction::Confirm => {
+                break; // Proceed to summary
+            }
+            ConfirmationAction::RegenerateAgent(agent_id) => {
+                // Re-run a single agent
+                log::info!("Regenerating agent {} for task {}", agent_id, task_run_id);
+
+                let agent_config = all_agents.iter()
+                    .find(|a| a.id == agent_id)
+                    .ok_or_else(|| AppError::NotFound(format!("Agent {} not found", agent_id)))?
+                    .clone();
+
+                let agent_name = agent_config.name.clone();
+                let agent_model = agent_config.model.clone();
+
+                // Find the original input for this agent from plan
+                let planned = plan.assignments.iter()
+                    .find(|a| a.agent_id == agent_id);
+
+                let input_text = if let Some(planned) = planned {
+                    let mut parts = vec![planned.task_description.clone()];
+                    for dep_id in &planned.depends_on {
+                        if let Some(output) = agent_outputs.get(dep_id) {
+                            let dep_name = all_agents.iter()
+                                .find(|a| a.id == *dep_id)
+                                .map(|a| a.name.clone())
+                                .unwrap_or_else(|| "Previous agent".into());
+                            parts.push(format!("\n--- Output from {dep_name} ---\n{output}"));
+                        }
+                    }
+                    parts.join("\n")
+                } else {
+                    "(Regenerated)".to_string()
+                };
+
+                // Emit agent_started for the regeneration
+                let regen_assignment_id = uuid::Uuid::new_v4().to_string();
+                let acp_sid = {
+                    let sessions = state.acp_sessions.lock().await;
+                    let orch_key = format!("orch:{}", agent_id);
+                    sessions.get(&orch_key).map(|s| s.acp_session_id.clone())
+                };
+
+                let _ = app.emit("orchestration:agent_started", &serde_json::json!({
+                    "taskRunId": task_run_id,
+                    "assignmentId": regen_assignment_id,
+                    "agentId": agent_id,
+                    "agentName": agent_name,
+                    "model": agent_model,
+                    "sequenceOrder": 0,
+                    "acpSessionId": acp_sid,
+                    "isRegeneration": true,
+                }));
+
+                let assign_start = std::time::Instant::now();
+                let result = execute_agent_assignment(
+                    app, state, &agent_config, &input_text, task_run_id, None,
+                ).await;
+                let duration_ms = assign_start.elapsed().as_millis() as i64;
+
+                match result {
+                    Ok(prompt_result) => {
+                        total_tokens_in += prompt_result.tokens_in;
+                        total_tokens_out += prompt_result.tokens_out;
+
+                        let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
+                            "taskRunId": task_run_id,
+                            "assignmentId": regen_assignment_id,
+                            "agentId": agent_id,
+                            "agentName": agent_name,
+                            "durationMs": duration_ms,
+                            "status": "completed",
+                            "tokensIn": prompt_result.tokens_in,
+                            "tokensOut": prompt_result.tokens_out,
+                            "acpSessionId": prompt_result.acp_session_id,
+                            "output": prompt_result.text.clone(),
+                        }));
+
+                        agent_outputs.insert(agent_id.clone(), prompt_result.text);
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
+                            "taskRunId": task_run_id,
+                            "assignmentId": regen_assignment_id,
+                            "agentId": agent_id,
+                            "agentName": agent_name,
+                            "durationMs": duration_ms,
+                            "status": "failed",
+                            "error": &err_msg,
+                        }));
+                        agent_outputs.insert(agent_id.clone(), format!("(Agent failed: {})", err_msg));
+                    }
+                }
+
+                // Re-emit awaiting_confirmation so UI updates
+                let _ = app.emit("orchestration:awaiting_confirmation", &serde_json::json!({
+                    "taskRunId": task_run_id,
+                    "agentOutputs": &agent_outputs.iter().map(|(id, out)| {
+                        let name = all_agents.iter().find(|a| a.id == *id)
+                            .map(|a| a.name.as_str()).unwrap_or("Unknown");
+                        serde_json::json!({ "agentId": id, "agentName": name, "output": out })
+                    }).collect::<Vec<_>>(),
+                }));
+            }
+            ConfirmationAction::RegenerateAll => {
+                // Re-run all agents
+                log::info!("Regenerating all agents for task {}", task_run_id);
+
+                // Clear existing outputs
+                agent_outputs.clear();
+
+                // Re-execute all assignments following the same sequence order
+                for order in &sorted_orders {
+                    let group = &sequence_groups[order];
+
+                    for planned in group {
+                        if is_cancelled(state, task_run_id).await {
+                            return Ok(());
+                        }
+
+                        let agent_config = all_agents.iter()
+                            .find(|a| a.id == planned.agent_id)
+                            .ok_or_else(|| AppError::NotFound(format!("Agent {} not found", planned.agent_id)))?
+                            .clone();
+
+                        let agent_name = agent_config.name.clone();
+                        let agent_model = agent_config.model.clone();
+
+                        let mut input_parts = vec![planned.task_description.clone()];
+                        for dep_id in &planned.depends_on {
+                            if let Some(output) = agent_outputs.get(dep_id) {
+                                let dep_name = all_agents.iter()
+                                    .find(|a| a.id == *dep_id)
+                                    .map(|a| a.name.clone())
+                                    .unwrap_or_else(|| "Previous agent".into());
+                                input_parts.push(format!("\n--- Output from {dep_name} ---\n{output}"));
+                            }
+                        }
+                        let input_text = input_parts.join("\n");
+
+                        let regen_assignment_id = uuid::Uuid::new_v4().to_string();
+                        let acp_sid = {
+                            let sessions = state.acp_sessions.lock().await;
+                            let orch_key = format!("orch:{}", planned.agent_id);
+                            sessions.get(&orch_key).map(|s| s.acp_session_id.clone())
+                        };
+
+                        let _ = app.emit("orchestration:agent_started", &serde_json::json!({
+                            "taskRunId": task_run_id,
+                            "assignmentId": regen_assignment_id,
+                            "agentId": planned.agent_id,
+                            "agentName": agent_name,
+                            "model": agent_model,
+                            "sequenceOrder": planned.sequence_order,
+                            "acpSessionId": acp_sid,
+                            "isRegeneration": true,
+                        }));
+
+                        let assign_start = std::time::Instant::now();
+                        let result = execute_agent_assignment(
+                            app, state, &agent_config, &input_text, task_run_id, None,
+                        ).await;
+                        let duration_ms = assign_start.elapsed().as_millis() as i64;
+
+                        match result {
+                            Ok(prompt_result) => {
+                                total_tokens_in += prompt_result.tokens_in;
+                                total_tokens_out += prompt_result.tokens_out;
+
+                                let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
+                                    "taskRunId": task_run_id,
+                                    "assignmentId": regen_assignment_id,
+                                    "agentId": planned.agent_id,
+                                    "agentName": agent_name,
+                                    "durationMs": duration_ms,
+                                    "status": "completed",
+                                    "tokensIn": prompt_result.tokens_in,
+                                    "tokensOut": prompt_result.tokens_out,
+                                    "acpSessionId": prompt_result.acp_session_id,
+                                    "output": prompt_result.text.clone(),
+                                }));
+
+                                agent_outputs.insert(planned.agent_id.clone(), prompt_result.text);
+                            }
+                            Err(e) => {
+                                let err_msg = e.to_string();
+                                let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
+                                    "taskRunId": task_run_id,
+                                    "assignmentId": regen_assignment_id,
+                                    "agentId": planned.agent_id,
+                                    "agentName": agent_name,
+                                    "durationMs": duration_ms,
+                                    "status": "failed",
+                                    "error": &err_msg,
+                                }));
+                                agent_outputs.insert(planned.agent_id.clone(), format!("(Agent failed: {})", err_msg));
+                            }
+                        }
+                    }
+                }
+
+                // Re-emit awaiting_confirmation
+                let _ = app.emit("orchestration:awaiting_confirmation", &serde_json::json!({
+                    "taskRunId": task_run_id,
+                    "agentOutputs": &agent_outputs.iter().map(|(id, out)| {
+                        let name = all_agents.iter().find(|a| a.id == *id)
+                            .map(|a| a.name.as_str()).unwrap_or("Unknown");
+                        serde_json::json!({ "agentId": id, "agentName": name, "output": out })
+                    }).collect::<Vec<_>>(),
+                }));
+            }
+        }
+    }
+
+    // Clean up pending confirmation
+    {
+        let mut confirmations = state.pending_confirmations.lock().await;
+        confirmations.remove(task_run_id);
+    }
+
+    // Clean up per-agent cancellation tokens for this task run
+    {
+        let mut agent_cancels = state.agent_cancellations.lock().await;
+        agent_cancels.retain(|(trid, _), _| trid != task_run_id);
+    }
+
+    // 8. Finalize — ask control hub for a summary
     let summary_prompt = format!(
         "Summarize the results of the orchestration.\n\nOriginal request: {}\n\nAgent outputs:\n{}",
         user_prompt,
@@ -342,8 +737,9 @@ Rules:
             .collect::<String>()
     );
 
-    let summary = send_prompt_to_agent(app, state, &hub_agent.id, &summary_prompt)
+    let summary = send_prompt_to_agent(app, state, &hub_agent.id, &summary_prompt, Some(task_run_id), None)
         .await
+        .map(|r| r.text)
         .unwrap_or_else(|_| "Summary not available".into());
 
     let total_duration_ms = start_time.elapsed().as_millis() as i64;
@@ -483,60 +879,24 @@ async fn ensure_agent_running(
         .and_then(|j| serde_json::from_str(j).ok())
         .unwrap_or_default();
 
-    let mut final_command = acp_command;
-    let mut final_args = args;
+    // Use provisioner to resolve the command
+    let resolved = provisioner::resolve_agent_command(&acp_command, &args).await?;
 
-    // Auto-upgrade npx/pnpx
-    if final_command.contains("npx") || final_command.contains("pnpx") {
-        let project_root = crate::acp::discovery::get_project_root();
-        let adapter_path = project_root
-            .join("node_modules")
-            .join("@zed-industries")
-            .join("claude-code-acp")
-            .join("dist")
-            .join("index.js");
+    log::info!(
+        "Orchestrator spawning agent: {}, command={}, args={:?}, agent_type={}",
+        agent.id, resolved.command, resolved.args, resolved.agent_type
+    );
 
-        if adapter_path.exists() {
-            let enriched_path = crate::acp::discovery::get_enriched_path();
-            if let Some(node_path) = std::env::split_paths(&enriched_path)
-                .map(|p| p.join("node"))
-                .find(|p| p.exists())
-            {
-                final_command = node_path.to_string_lossy().to_string();
-                final_args = vec![adapter_path.to_string_lossy().to_string()];
-            }
-        }
-    }
+    // Build extra environment variables
+    let extra_env = discovery::get_agent_env_for_command(&resolved.agent_type).await;
 
-    // Sync from discovered agents
-    {
-        let discovered = state.discovered_agents.lock().await;
-        let cmd_basename = std::path::Path::new(&final_command)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&final_command);
-
-        if let Some(matched) = discovered.iter().find(|d| {
-            d.available && {
-                let d_basename = std::path::Path::new(&d.command)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&d.command);
-                d_basename == cmd_basename || d.name == agent.name
-            }
-        }) {
-            let discovered_args: Vec<String> =
-                serde_json::from_str(&matched.args_json).unwrap_or_default();
-            if final_command != matched.command || final_args != discovered_args {
-                final_command = matched.command.clone();
-                final_args = discovered_args;
-            }
-        }
-    }
-
-    log::info!("Orchestrator spawning agent: {}, command={}, args={:?}", agent.id, final_command, final_args);
-
-    let process = manager::spawn_agent_process(&agent.id, &final_command, &final_args).await?;
+    let process = manager::spawn_agent_process(
+        &agent.id,
+        &resolved.command,
+        &resolved.args,
+        &extra_env,
+        &resolved.agent_type,
+    ).await?;
     let stdin_handle = process.stdin.clone();
 
     {
@@ -566,12 +926,15 @@ async fn ensure_agent_running(
 
 /// Send a prompt to an agent and collect the complete text response.
 /// This creates a session if needed and waits for the full result.
+/// Also forwards tool_call, thought events and extracts token usage.
 async fn send_prompt_to_agent(
     app: &tauri::AppHandle,
     state: &AppState,
     agent_id: &str,
     prompt: &str,
-) -> AppResult<String> {
+    task_run_id: Option<&str>,
+    cancel_token: Option<&CancellationToken>,
+) -> AppResult<AgentPromptResult> {
     // Ensure agent is running
     let agent: AgentConfig = {
         let state_clone = state.clone();
@@ -599,16 +962,16 @@ async fn send_prompt_to_agent(
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".into());
 
-            let acp_id = client::create_session(process, &cwd).await?;
+            let (acp_id, _models) = client::create_session(process, &cwd).await?;
 
             let mut sessions = state.acp_sessions.lock().await;
             sessions.insert(
                 orch_session_key.clone(),
-                crate::state::AcpSessionInfo {
-                    session_id: orch_session_key.clone(),
-                    agent_id: agent_id.to_string(),
-                    acp_session_id: acp_id.clone(),
-                },
+                crate::state::AcpSessionInfo::new(
+                    orch_session_key.clone(),
+                    agent_id.to_string(),
+                    acp_id.clone(),
+                ),
             );
 
             acp_id
@@ -628,8 +991,17 @@ async fn send_prompt_to_agent(
 
     // Collect response
     let mut collected_text = String::new();
+    let mut tokens_in: i64 = 0;
+    let mut tokens_out: i64 = 0;
 
     loop {
+        // Check per-agent cancellation
+        if let Some(token) = cancel_token {
+            if token.is_cancelled() {
+                return Err(AppError::Internal("Agent cancelled".into()));
+            }
+        }
+
         let msg = {
             let mut processes = state.agent_processes.lock().await;
             if let Some(process) = processes.get_mut(agent_id) {
@@ -667,30 +1039,173 @@ async fn send_prompt_to_agent(
                             .and_then(|s| s.as_str())
                             .unwrap_or("");
 
-                        if update_type == "agent_message_chunk" || update_type == "user_message_chunk" {
-                            if let Some(text) = msg
-                                .get("params")
-                                .and_then(|p| p.get("update"))
-                                .and_then(|u| u.get("content"))
-                                .and_then(|c| c.get("text"))
-                                .and_then(|t| t.as_str())
-                            {
-                                collected_text.push_str(text);
+                        match update_type {
+                            "agent_message_chunk" | "user_message_chunk" => {
+                                if let Some(text) = msg
+                                    .get("params")
+                                    .and_then(|p| p.get("update"))
+                                    .and_then(|u| u.get("content"))
+                                    .and_then(|c| c.get("text"))
+                                    .and_then(|t| t.as_str())
+                                {
+                                    collected_text.push_str(text);
 
-                                // Emit streaming chunk for UI
-                                let _ = app.emit("orchestration:agent_chunk", &serde_json::json!({
+                                    let _ = app.emit("orchestration:agent_chunk", &serde_json::json!({
+                                        "agentId": agent_id,
+                                        "text": text,
+                                    }));
+                                }
+                            }
+                            "tool_call" | "tool_call_update" => {
+                                // Forward tool call events
+                                let update = msg.get("params")
+                                    .and_then(|p| p.get("update"));
+                                let tool_call_id = update
+                                    .and_then(|u| u.get("toolCallId"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let tool_name = update
+                                    .and_then(|u| u.get("name"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let tool_title = update
+                                    .and_then(|u| u.get("title"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let tool_status = update
+                                    .and_then(|u| u.get("status"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(update_type);
+                                let raw_input = update
+                                    .and_then(|u| u.get("rawInput"))
+                                    .cloned();
+                                let raw_output = update
+                                    .and_then(|u| u.get("rawOutput"))
+                                    .cloned();
+
+                                let _ = app.emit("orchestration:agent_tool_call", &serde_json::json!({
                                     "agentId": agent_id,
-                                    "text": text,
+                                    "toolCallId": tool_call_id,
+                                    "name": tool_name,
+                                    "title": tool_title,
+                                    "status": tool_status,
+                                    "rawInput": raw_input,
+                                    "rawOutput": raw_output,
                                 }));
                             }
+                            "agent_thought_chunk" => {
+                                // Forward agent thought events
+                                if let Some(text) = msg
+                                    .get("params")
+                                    .and_then(|p| p.get("update"))
+                                    .and_then(|u| u.get("content"))
+                                    .and_then(|c| c.get("text"))
+                                    .and_then(|t| t.as_str())
+                                {
+                                    let _ = app.emit("orchestration:agent_thought", &serde_json::json!({
+                                        "agentId": agent_id,
+                                        "text": text,
+                                    }));
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     "session/requestPermission" | "session/request_permission" => {
-                        // Forward permission requests to frontend
-                        let _ = app.emit("acp:permission_request", &msg);
+                        // Extract permission request details
+                        let params = msg.get("params");
+                        let perm_request_id = msg.get("id")
+                            .and_then(|v| v.as_i64())
+                            .map(|v| v.to_string())
+                            .or_else(|| msg.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                            .unwrap_or_default();
+
+                        let session_id_val = params
+                            .and_then(|p| p.get("sessionId"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        let tool_call_info = params
+                            .and_then(|p| p.get("toolCall"))
+                            .cloned();
+
+                        let options = params
+                            .and_then(|p| p.get("options"))
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!([]));
+
+                        if let Some(trid) = task_run_id {
+                            // Emit orchestration-specific permission event
+                            let _ = app.emit("orchestration:orch_permission", &serde_json::json!({
+                                "taskRunId": trid,
+                                "agentId": agent_id,
+                                "requestId": perm_request_id,
+                                "sessionId": session_id_val,
+                                "toolCall": tool_call_info,
+                                "options": options,
+                            }));
+
+                            // Wait for user response via oneshot channel
+                            let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+                            {
+                                let perm_key = (trid.to_string(), perm_request_id.clone());
+                                let mut perms = state.pending_orch_permissions.lock().await;
+                                perms.insert(perm_key, tx);
+                            }
+
+                            // Wait with timeout
+                            let option_id = match tokio::time::timeout(
+                                std::time::Duration::from_secs(600),
+                                rx,
+                            ).await {
+                                Ok(Ok(id)) => id,
+                                Ok(Err(_)) => "allow".to_string(), // channel dropped, default allow
+                                Err(_) => "allow".to_string(),     // timeout, default allow
+                            };
+
+                            // Send permission response back to agent via stdin
+                            let perm_response_id: serde_json::Value = perm_request_id.parse::<i64>()
+                                .map(|v| serde_json::json!(v))
+                                .unwrap_or_else(|_| serde_json::json!(perm_request_id));
+                            {
+                                let stdins = state.agent_stdins.lock().await;
+                                if let Some(stdin) = stdins.get(agent_id) {
+                                    let response_json = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": perm_response_id,
+                                        "result": {
+                                            "outcome": "selected",
+                                            "optionId": option_id,
+                                        }
+                                    });
+                                    use tokio::io::AsyncWriteExt;
+                                    let json_str = serde_json::to_string(&response_json).unwrap_or_default();
+                                    let mut stdin_writer = stdin.lock().await;
+                                    let _ = stdin_writer.write_all(json_str.as_bytes()).await;
+                                    let _ = stdin_writer.write_all(b"\n").await;
+                                    let _ = stdin_writer.flush().await;
+                                }
+                            }
+                        } else {
+                            // Non-orchestration context: forward as before
+                            let _ = app.emit("acp:permission_request", &msg);
+                        }
                     }
                     "" => {
                         // JSON-RPC response — end of prompt
+                        // Extract token usage if present
+                        if let Some(result) = msg.get("result") {
+                            if let Some(usage) = result.get("usage") {
+                                tokens_in = usage.get("tokensIn")
+                                    .or_else(|| usage.get("input_tokens"))
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                tokens_out = usage.get("tokensOut")
+                                    .or_else(|| usage.get("output_tokens"))
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                            }
+                        }
                         if msg.get("result").is_some() || msg.get("error").is_some() {
                             break;
                         }
@@ -706,7 +1221,12 @@ async fn send_prompt_to_agent(
         collected_text = "(No response from agent)".into();
     }
 
-    Ok(collected_text)
+    Ok(AgentPromptResult {
+        text: collected_text,
+        tokens_in,
+        tokens_out,
+        acp_session_id,
+    })
 }
 
 async fn execute_agent_assignment(
@@ -714,10 +1234,11 @@ async fn execute_agent_assignment(
     state: &AppState,
     agent: &AgentConfig,
     input: &str,
-    _task_run_id: &str,
-) -> AppResult<String> {
+    task_run_id: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> AppResult<AgentPromptResult> {
     ensure_agent_running(app, state, agent).await?;
-    send_prompt_to_agent(app, state, &agent.id, input).await
+    send_prompt_to_agent(app, state, &agent.id, input, Some(task_run_id), cancel_token).await
 }
 
 async fn is_cancelled(state: &AppState, task_run_id: &str) -> bool {

@@ -1,8 +1,15 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::AppResult;
 use crate::models::agent::DiscoveredAgent;
+
+// ---------------------------------------------------------------------------
+// User-defined agents.json
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentsJsonFile {
@@ -16,105 +23,416 @@ struct AgentsJsonEntry {
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
-    env: std::collections::HashMap<String, String>,
+    env: HashMap<String, String>,
 }
 
-/// ACP registry agent definition.
-struct RegistryAgent {
-    /// Binary / command name to look up in PATH.
-    command: &'static str,
-    /// Human-readable display name.
-    name: &'static str,
-    /// Extra CLI args required for ACP mode.
-    args: &'static [&'static str],
-    /// True if this agent uses the built-in Zed ACP adapter instead of PATH lookup.
-    builtin: bool,
+// ---------------------------------------------------------------------------
+// Dynamic registry types — matches CDN registry.json schema
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryFile {
+    pub version: String,
+    pub agents: Vec<RegistryEntry>,
+    #[serde(default)]
+    pub extensions: Vec<serde_json::Value>,
 }
 
-/// Full ACP agent registry (from https://agentclientprotocol.com/get-started/registry).
-/// Claude Code is handled specially via the built-in Zed ACP adapter.
-const REGISTRY_AGENTS: &[RegistryAgent] = &[
-    RegistryAgent {
-        command: "claude",
-        name: "Claude Code",
-        args: &[],
-        builtin: true,
-    },
-    RegistryAgent {
-        command: "codex",
-        name: "Codex CLI",
-        args: &["--acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "gemini",
-        name: "Gemini CLI",
-        args: &["--experimental-acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "copilot",
-        name: "GitHub Copilot",
-        args: &["--acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "auggie",
-        name: "Auggie CLI",
-        args: &["--acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "factory-droid",
-        name: "Factory Droid",
-        args: &["--acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "kimi",
-        name: "Kimi CLI",
-        args: &["acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "mistral-vibe",
-        name: "Mistral Vibe",
-        args: &["--acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "opencode",
-        name: "OpenCode",
-        args: &["acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "qoder",
-        name: "Qoder CLI",
-        args: &["--acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "qwen-code",
-        name: "Qwen Code",
-        args: &["--acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "goose",
-        name: "Goose",
-        args: &["acp"],
-        builtin: false,
-    },
-    RegistryAgent {
-        command: "aider",
-        name: "Aider",
-        args: &["--acp"],
-        builtin: false,
-    },
-];
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    pub distribution: Distribution,
+}
 
-/// Get platform-specific config paths to search for agents.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Distribution {
+    Npx(NpxDistribution),
+    Binary(HashMap<String, BinaryTarget>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NpxDistribution {
+    pub package: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinaryTarget {
+    pub archive: String,
+    pub cmd: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// Registry cache
+// ---------------------------------------------------------------------------
+
+const REGISTRY_URL: &str =
+    "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
+
+/// In-memory cache of the fetched registry.
+static REGISTRY_CACHE: OnceLock<AsyncMutex<Option<RegistryFile>>> = OnceLock::new();
+
+fn registry_mutex() -> &'static AsyncMutex<Option<RegistryFile>> {
+    REGISTRY_CACHE.get_or_init(|| AsyncMutex::new(None))
+}
+
+/// Local file cache path: `~/.iaagenthub/registry.json`
+fn local_cache_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".iaagenthub")
+        .join("registry.json")
+}
+
+/// Path to the installed-agents manifest: `~/.iaagenthub/installed.json`
+/// Contains a JSON array of registry IDs that have been explicitly installed.
+fn installed_manifest_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".iaagenthub")
+        .join("installed.json")
+}
+
+/// Read the set of explicitly-installed registry IDs.
+pub fn load_installed_set() -> std::collections::HashSet<String> {
+    let path = installed_manifest_path();
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(ids) = serde_json::from_str::<Vec<String>>(&content) {
+            return ids.into_iter().collect();
+        }
+    }
+    std::collections::HashSet::new()
+}
+
+/// Persist the set of installed registry IDs.
+fn save_installed_set(set: &std::collections::HashSet<String>) -> Result<(), String> {
+    let path = installed_manifest_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+    }
+    let ids: Vec<&String> = set.iter().collect();
+    let json = serde_json::to_string_pretty(&ids).map_err(|e| format!("json: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write: {e}"))?;
+    Ok(())
+}
+
+/// Mark a registry ID as installed.
+pub fn mark_installed(registry_id: &str) {
+    let mut set = load_installed_set();
+    set.insert(registry_id.to_string());
+    if let Err(e) = save_installed_set(&set) {
+        log::warn!("Failed to save installed manifest: {}", e);
+    }
+}
+
+/// Mark a registry ID as uninstalled.
+pub fn mark_uninstalled(registry_id: &str) {
+    let mut set = load_installed_set();
+    set.remove(registry_id);
+    if let Err(e) = save_installed_set(&set) {
+        log::warn!("Failed to save installed manifest: {}", e);
+    }
+}
+
+/// Fetch the registry from CDN, falling back to local file cache.
+/// The result is cached in memory for subsequent calls.
+pub async fn fetch_registry() -> AppResult<RegistryFile> {
+    // Return in-memory cache if available
+    {
+        let guard = registry_mutex().lock().await;
+        if let Some(ref cached) = *guard {
+            return Ok(cached.clone());
+        }
+    }
+
+    let registry = match fetch_registry_from_cdn().await {
+        Ok(reg) => {
+            // Persist to local cache
+            if let Err(e) = save_local_cache(&reg).await {
+                log::warn!("Failed to save registry cache: {}", e);
+            }
+            reg
+        }
+        Err(e) => {
+            log::warn!("Failed to fetch registry from CDN: {}, trying local cache", e);
+            load_local_cache().await.map_err(|cache_err| {
+                crate::error::AppError::Internal(format!(
+                    "Failed to fetch registry from CDN ({}) and local cache ({})",
+                    e, cache_err
+                ))
+            })?
+        }
+    };
+
+    // Store in memory cache
+    {
+        let mut guard = registry_mutex().lock().await;
+        *guard = Some(registry.clone());
+    }
+
+    log::info!(
+        "Registry loaded: {} agents, version {}",
+        registry.agents.len(),
+        registry.version
+    );
+    Ok(registry)
+}
+
+async fn fetch_registry_from_cdn() -> Result<RegistryFile, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let resp = client
+        .get(REGISTRY_URL)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request error: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Read body error: {e}"))?;
+
+    serde_json::from_str::<RegistryFile>(&body)
+        .map_err(|e| format!("JSON parse error: {e}"))
+}
+
+async fn save_local_cache(registry: &RegistryFile) -> Result<(), String> {
+    let path = local_cache_path();
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("mkdir error: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(registry)
+        .map_err(|e| format!("JSON serialize error: {e}"))?;
+    tokio::fs::write(&path, json)
+        .await
+        .map_err(|e| format!("Write cache error: {e}"))?;
+    log::debug!("Saved registry cache to {:?}", path);
+    Ok(())
+}
+
+async fn load_local_cache() -> Result<RegistryFile, String> {
+    let path = local_cache_path();
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Read cache error: {e}"))?;
+    serde_json::from_str::<RegistryFile>(&content)
+        .map_err(|e| format!("Parse cache error: {e}"))
+}
+
+/// Force-refresh the registry from CDN (clears in-memory cache first).
+pub async fn refresh_registry() -> AppResult<RegistryFile> {
+    {
+        let mut guard = registry_mutex().lock().await;
+        *guard = None;
+    }
+    fetch_registry().await
+}
+
+// ---------------------------------------------------------------------------
+// Platform detection
+// ---------------------------------------------------------------------------
+
+/// Return the current platform identifier matching the registry format.
+/// e.g. `darwin-aarch64`, `linux-x86_64`, `windows-x86_64`
+pub fn get_current_platform() -> &'static str {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    { "darwin-aarch64" }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    { "darwin-x86_64" }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    { "linux-aarch64" }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    { "linux-x86_64" }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    { "windows-aarch64" }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    { "windows-x86_64" }
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+    )))]
+    { "unknown" }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic registry lookup helpers
+// ---------------------------------------------------------------------------
+
+/// Look up a registry entry by its ID.
+pub async fn get_registry_entry(id: &str) -> Option<RegistryEntry> {
+    let registry = fetch_registry().await.ok()?;
+    registry.agents.into_iter().find(|e| e.id == id)
+}
+
+/// Look up a registry entry by command name.
+/// For npx agents, this matches the binary name in the package (e.g. "gemini" matches package containing "gemini-cli").
+/// For binary agents, this matches the cmd field basename.
+pub async fn get_registry_entry_by_command(command: &str) -> Option<RegistryEntry> {
+    let basename = std::path::Path::new(command)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(command);
+
+    let registry = fetch_registry().await.ok()?;
+    registry.agents.into_iter().find(|entry| {
+        match &entry.distribution {
+            Distribution::Npx(npx) => {
+                // Match against the binary name extracted from the package specifier
+                let pkg_basename = extract_npx_binary_name(&npx.package);
+                pkg_basename == basename || entry.id == basename
+            }
+            Distribution::Binary(platforms) => {
+                // Match against cmd basename from any platform
+                entry.id == basename
+                    || platforms.values().any(|t| {
+                        let cmd_base = t.cmd.trim_start_matches("./");
+                        let cmd_base = cmd_base.strip_suffix(".exe").unwrap_or(cmd_base);
+                        cmd_base == basename
+                    })
+            }
+        }
+    })
+}
+
+/// Get environment variables from a registry entry for the current platform.
+pub fn get_env_for_entry(entry: &RegistryEntry) -> HashMap<String, String> {
+    match &entry.distribution {
+        Distribution::Npx(npx) => npx.env.clone(),
+        Distribution::Binary(platforms) => {
+            let platform = get_current_platform();
+            platforms
+                .get(platform)
+                .map(|t| t.env.clone())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// Get extra environment variables for a given agent command (dynamic lookup).
+pub async fn get_agent_env_for_command(command: &str) -> HashMap<String, String> {
+    if let Some(entry) = get_registry_entry_by_command(command).await {
+        get_env_for_entry(&entry)
+    } else {
+        HashMap::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path and discovery utilities (unchanged)
+// ---------------------------------------------------------------------------
+
+/// Return the directory where downloaded adapter binaries are cached.
+/// `~/.iaagenthub/adapters/`
+pub fn get_adapters_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".iaagenthub")
+        .join("adapters")
+}
+
+/// Check if a downloaded binary exists in the adapters cache for the given agent ID.
+/// Returns the full path if found.
+pub fn check_downloaded_binary(agent_id: &str) -> Option<PathBuf> {
+    let dir = get_adapters_dir().join(agent_id);
+    if !dir.exists() {
+        return None;
+    }
+    // Try to find any executable file in the directory
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = path.metadata() {
+                        if meta.permissions().mode() & 0o111 != 0 {
+                            return Some(path);
+                        }
+                    }
+                }
+                #[cfg(windows)]
+                {
+                    if let Some(ext) = path.extension() {
+                        if ext == "exe" {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: check for binary named after the agent_id
+    let candidate = dir.join(agent_id);
+    if candidate.exists() && candidate.is_file() {
+        return Some(candidate);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let candidate_exe = dir.join(format!("{}.exe", agent_id));
+        if candidate_exe.exists() && candidate_exe.is_file() {
+            return Some(candidate_exe);
+        }
+    }
+    None
+}
+
+/// Extract the CLI binary name from an npm package specifier.
+///
+/// Handles scoped (`@scope/name@version`) and unscoped (`name@version`) packages:
+///   `@zed-industries/claude-code-acp@0.16.0` → `claude-code-acp`
+///   `@google/gemini-cli@0.27.3`              → `gemini-cli`
+///   `some-tool@1.0.0`                        → `some-tool`
+fn extract_npx_binary_name(package: &str) -> &str {
+    // Step 1: strip the version suffix
+    let without_version = if package.starts_with('@') {
+        // Scoped: @scope/name or @scope/name@version
+        // Find the second '@' which is the version separator
+        if let Some(pos) = package[1..].find('@') {
+            &package[..pos + 1]
+        } else {
+            package
+        }
+    } else {
+        // Unscoped: name or name@version
+        package.split('@').next().unwrap_or(package)
+    };
+
+    // Step 2: take the part after the last '/' (strip scope)
+    without_version.rsplit('/').next().unwrap_or(without_version)
+}
 fn get_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
@@ -162,6 +480,41 @@ pub(crate) fn get_enriched_path() -> String {
             extra.push(home.join(".local").join("bin"));
             extra.push(home.join(".cargo").join("bin"));
             extra.push(home.join("bin"));
+
+            // Node version managers — ensure node/npx are discoverable
+            let nvm_dir = std::env::var("NVM_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join(".nvm"));
+            let node_versions = nvm_dir.join("versions").join("node");
+            if node_versions.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&node_versions) {
+                    for entry in entries.flatten() {
+                        let bin = entry.path().join("bin");
+                        if bin.is_dir() {
+                            extra.push(bin);
+                        }
+                    }
+                }
+            }
+
+            // fnm: ~/.fnm/aliases/default/bin
+            extra.push(home.join(".fnm").join("aliases").join("default").join("bin"));
+
+            // volta: ~/.volta/bin
+            extra.push(home.join(".volta").join("bin"));
+        }
+
+        // Adapters dir (for downloaded binary agents)
+        let adapters_dir = get_adapters_dir();
+        if adapters_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&adapters_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        extra.push(path);
+                    }
+                }
+            }
         }
 
         extra.push(PathBuf::from("/opt/homebrew/bin"));
@@ -189,8 +542,11 @@ pub(crate) fn get_enriched_path() -> String {
 
 /// Try to resolve the full path of a command using an enriched PATH.
 fn resolve_command(cmd: &str) -> Option<String> {
-    let enriched_path = get_enriched_path();
+    resolve_command_with_path(cmd, &get_enriched_path())
+}
 
+/// Resolve command in PATH using a specific PATH env value.
+fn resolve_command_with_path(cmd: &str, path_env: &str) -> Option<String> {
     #[cfg(target_os = "windows")]
     let lookup = "where.exe";
     #[cfg(not(target_os = "windows"))]
@@ -198,7 +554,8 @@ fn resolve_command(cmd: &str) -> Option<String> {
 
     let output = std::process::Command::new(lookup)
         .arg(cmd)
-        .env("PATH", &enriched_path)
+        .env("PATH", path_env)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
@@ -206,34 +563,11 @@ fn resolve_command(cmd: &str) -> Option<String> {
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let first_line = stdout.lines().next().unwrap_or("").trim().to_string();
-        if first_line.is_empty() { None } else { Some(first_line) }
+        let first = stdout.lines().next().unwrap_or("").trim().to_string();
+        if first.is_empty() { None } else { Some(first) }
     } else {
         None
     }
-}
-
-/// Check if the built-in Zed ACP adapter for Claude Code is available.
-fn check_builtin_acp_adapter() -> Option<(String, String)> {
-    let project_root = get_project_root();
-    let adapter_path = project_root
-        .join("node_modules")
-        .join("@zed-industries")
-        .join("claude-code-acp")
-        .join("dist")
-        .join("index.js");
-
-    if !adapter_path.exists() {
-        log::debug!("Built-in ACP adapter not found at: {:?}", adapter_path);
-        return None;
-    }
-
-    log::info!("Found built-in ACP adapter at: {:?}", adapter_path);
-
-    let node_path = resolve_command("node")?;
-    log::info!("Found node at: {}", node_path);
-
-    Some((node_path, adapter_path.to_string_lossy().to_string()))
 }
 
 /// Scan config file paths for user-defined agents (always marked available).
@@ -258,6 +592,10 @@ async fn scan_config_agents() -> Vec<DiscoveredAgent> {
                                 .format("%Y-%m-%d %H:%M:%S")
                                 .to_string(),
                             available: true,
+                            models: Vec::new(),
+                            registry_id: None,
+                            icon_url: None,
+                            description: String::new(),
                         });
                     }
                 }
@@ -268,62 +606,132 @@ async fn scan_config_agents() -> Vec<DiscoveredAgent> {
     agents
 }
 
-/// Discover all ACP agents from the registry.
+// ---------------------------------------------------------------------------
+// Main discovery entry point
+// ---------------------------------------------------------------------------
+
+/// Discover all ACP agents from the dynamic registry + user config.
 /// Returns ALL registry agents; `available` indicates whether installed on the system.
-/// Also includes user-defined agents from config files (always available).
 pub async fn discover_agents() -> AppResult<Vec<DiscoveredAgent>> {
+    let registry = fetch_registry().await?;
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let platform = get_current_platform();
+    let installed_set = load_installed_set();
+    let npx_available = resolve_command("npx").is_some();
     let mut agents = Vec::new();
 
-    // Check if the built-in Zed ACP adapter exists (for Claude Code)
-    let builtin_adapter = check_builtin_acp_adapter();
+    for entry in &registry.agents {
+        let explicitly_installed = installed_set.contains(&entry.id);
 
-    // Build entries for every registry agent
-    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    for reg in REGISTRY_AGENTS {
-        if reg.builtin {
-            // Claude Code — use built-in adapter if present
-            if let Some((node_path, adapter_path)) = &builtin_adapter {
-                let args = vec![adapter_path.clone()];
+        match &entry.distribution {
+            Distribution::Npx(npx) => {
+                let pkg_name = extract_npx_binary_name(&npx.package);
+                let direct_resolved = resolve_command(pkg_name);
+
+                // Available only if binary is on PATH or explicitly installed (via manifest)
+                let available = direct_resolved.is_some() || explicitly_installed;
+                // Can be installed if npx exists on PATH
+                let can_install = npx_available;
+
+                let command = if let Some(ref path) = direct_resolved {
+                    path.clone()
+                } else {
+                    pkg_name.to_string()
+                };
+
+                let source_path = if direct_resolved.is_some() {
+                    command.clone()
+                } else if explicitly_installed {
+                    format!("npx:{}", npx.package)
+                } else if can_install {
+                    format!("installable:npx:{}", npx.package)
+                } else {
+                    String::new()
+                };
+
                 agents.push(DiscoveredAgent {
                     id: uuid::Uuid::new_v4().to_string(),
-                    name: reg.name.to_string(),
-                    command: node_path.clone(),
-                    args_json: serde_json::to_string(&args).unwrap_or_else(|_| "[]".into()),
-                    env_json: "{}".into(),
-                    source_path: adapter_path.clone(),
+                    name: entry.name.clone(),
+                    command,
+                    args_json: serde_json::to_string(&npx.args)
+                        .unwrap_or_else(|_| "[]".into()),
+                    env_json: serde_json::to_string(&npx.env)
+                        .unwrap_or_else(|_| "{}".into()),
+                    source_path,
                     last_seen_at: now.clone(),
-                    available: true,
-                });
-            } else {
-                // Adapter not installed — still list but unavailable
-                agents.push(DiscoveredAgent {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: reg.name.to_string(),
-                    command: reg.command.to_string(),
-                    args_json: "[]".into(),
-                    env_json: "{}".into(),
-                    source_path: String::new(),
-                    last_seen_at: now.clone(),
-                    available: false,
+                    available,
+                    models: Vec::new(),
+                    registry_id: Some(entry.id.clone()),
+                    icon_url: entry.icon.clone(),
+                    description: entry.description.clone(),
                 });
             }
-        } else {
-            // Non-builtin agent — check if command exists in PATH
-            let resolved = resolve_command(reg.command);
-            let available = resolved.is_some();
-            let command = resolved.unwrap_or_else(|| reg.command.to_string());
-            let args: Vec<String> = reg.args.iter().map(|s| s.to_string()).collect();
+            Distribution::Binary(platforms) => {
+                let target = platforms.get(platform);
 
-            agents.push(DiscoveredAgent {
-                id: uuid::Uuid::new_v4().to_string(),
-                name: reg.name.to_string(),
-                command: command.clone(),
-                args_json: serde_json::to_string(&args).unwrap_or_else(|_| "[]".into()),
-                env_json: "{}".into(),
-                source_path: if available { command } else { String::new() },
-                last_seen_at: now.clone(),
-                available,
-            });
+                if let Some(target) = target {
+                    let cmd_name = target.cmd.trim_start_matches("./");
+                    let cmd_name = cmd_name.strip_suffix(".exe").unwrap_or(cmd_name);
+
+                    let direct_resolved = resolve_command(cmd_name);
+                    let cached = check_downloaded_binary(&entry.id);
+
+                    // Available only if on PATH, in cache, or explicitly installed
+                    let available = direct_resolved.is_some()
+                        || cached.is_some()
+                        || explicitly_installed;
+
+                    let command = if let Some(ref path) = direct_resolved {
+                        path.clone()
+                    } else if let Some(ref cached_path) = cached {
+                        cached_path.to_string_lossy().to_string()
+                    } else {
+                        cmd_name.to_string()
+                    };
+
+                    let source_path = if let Some(ref path) = direct_resolved {
+                        path.clone()
+                    } else if let Some(ref cached_path) = cached {
+                        cached_path.to_string_lossy().to_string()
+                    } else {
+                        // Not installed yet — mark as installable
+                        format!("installable:binary:{}", target.archive)
+                    };
+
+                    agents.push(DiscoveredAgent {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: entry.name.clone(),
+                        command,
+                        args_json: serde_json::to_string(&target.args)
+                            .unwrap_or_else(|_| "[]".into()),
+                        env_json: serde_json::to_string(&target.env)
+                            .unwrap_or_else(|_| "{}".into()),
+                        source_path,
+                        last_seen_at: now.clone(),
+                        available,
+                        models: Vec::new(),
+                        registry_id: Some(entry.id.clone()),
+                        icon_url: entry.icon.clone(),
+                        description: entry.description.clone(),
+                    });
+                } else {
+                    // No binary for current platform
+                    agents.push(DiscoveredAgent {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: entry.name.clone(),
+                        command: entry.id.clone(),
+                        args_json: "[]".into(),
+                        env_json: "{}".into(),
+                        source_path: String::new(),
+                        last_seen_at: now.clone(),
+                        available: false,
+                        models: Vec::new(),
+                        registry_id: Some(entry.id.clone()),
+                        icon_url: entry.icon.clone(),
+                        description: entry.description.clone(),
+                    });
+                }
+            }
         }
     }
 

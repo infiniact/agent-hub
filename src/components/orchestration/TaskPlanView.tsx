@@ -1,7 +1,7 @@
 "use client";
 
 import type { TaskPlan, AgentTrackingInfo } from "@/types/orchestration";
-import { ArrowDown, CheckCircle2, Loader2, Circle } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 import { useAgentStore } from "@/stores/agentStore";
 
 interface TaskPlanViewProps {
@@ -18,12 +18,12 @@ export function TaskPlanView({ plan, agentTracking }: TaskPlanViewProps) {
 
   const getStatusIcon = (agentId: string) => {
     const tracking = agentTracking[agentId];
-    if (!tracking) return <Circle className="size-3.5 text-slate-300 dark:text-gray-600" />;
+    if (!tracking) return <Codicon name="circle-outline" className="text-[14px] text-slate-300 dark:text-gray-600" />;
     if (tracking.status === "completed")
-      return <CheckCircle2 className="size-3.5 text-emerald-400" />;
+      return <Codicon name="pass-filled" className="text-[14px] text-emerald-400" />;
     if (tracking.status === "running")
-      return <Loader2 className="size-3.5 animate-spin text-primary" />;
-    return <Circle className="size-3.5 text-slate-300 dark:text-gray-600" />;
+      return <Codicon name="loading" className="text-[14px] codicon-modifier-spin text-primary" />;
+    return <Codicon name="circle-outline" className="text-[14px] text-slate-300 dark:text-gray-600" />;
   };
 
   // Sort assignments by sequence_order
@@ -46,7 +46,7 @@ export function TaskPlanView({ plan, agentTracking }: TaskPlanViewProps) {
           <div key={`${assignment.agent_id}-${idx}`}>
             {idx > 0 && (
               <div className="flex justify-center py-0.5">
-                <ArrowDown className="size-3 text-slate-300 dark:text-gray-600" />
+                <Codicon name="arrow-down" className="text-[12px] text-slate-300 dark:text-gray-600" />
               </div>
             )}
             <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-slate-50 dark:bg-white/[0.03]">

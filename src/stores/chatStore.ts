@@ -6,6 +6,7 @@ import type {
   CreateSessionRequest,
 } from '@/types/chat';
 import { useEffect } from 'react';
+import { useAcpStore } from './acpStore';
 
 interface PermissionRequest {
   id: number | string;
@@ -49,6 +50,7 @@ interface ChatActions {
   addUserMessage: (content: string) => void;
   respondToPermission: (agentId: string, optionId: string, userMessage?: string) => Promise<void>;
   clearPendingPermission: () => void;
+  endSession: (sessionId: string) => Promise<void>;
 }
 
 export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
@@ -97,20 +99,36 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
       sessions: state.sessions.map(s => ({ id: s.id, agent_id: s.agent_id }))
     });
 
-    // If we already have a current session, use it
+    // If we already have a current session for this agent, use it
     if (state.currentSessionId) {
-      console.log('[ChatStore] Using existing session:', state.currentSessionId);
-      return state.currentSessionId;
+      const currentSession = state.sessions.find(s => s.id === state.currentSessionId);
+      if (currentSession && currentSession.agent_id === agentId) {
+        console.log('[ChatStore] Using existing session for current agent:', state.currentSessionId);
+        // Try to resume the ACP session
+        try {
+          await useAcpStore.getState().resumeAcpSession(state.currentSessionId);
+        } catch (error) {
+          console.warn('[ChatStore] Failed to resume ACP session, will create new one on send:', error);
+        }
+        return state.currentSessionId;
+      }
     }
 
     // Try to find an existing session for this agent
     if (state.sessions.length > 0) {
       const existingSession = state.sessions.find((s) => s.agent_id === agentId);
       if (existingSession) {
-        console.log('[ChatStore] Found existing session:', existingSession.id);
+        console.log('[ChatStore] Found existing session for agent:', existingSession.id);
         set({ currentSessionId: existingSession.id });
         // Load previous messages for context persistence
         await get().fetchMessages(existingSession.id);
+        // Try to resume the ACP session
+        try {
+          const result = await useAcpStore.getState().resumeAcpSession(existingSession.id);
+          console.log('[ChatStore] Resumed ACP session:', result);
+        } catch (error) {
+          console.warn('[ChatStore] Failed to resume ACP session, will create new one on send:', error);
+        }
         return existingSession.id;
       }
     }
@@ -129,6 +147,9 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
 
   deleteSession: async (id) => {
     try {
+      // First, end the ACP session if it exists
+      await get().endSession(id);
+      // Then delete from database
       await tauriInvoke<void>('delete_session', { id });
       set((state) => ({
         sessions: state.sessions.filter((s) => s.id !== id),
@@ -303,6 +324,15 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
   clearPendingPermission: () => {
     set({ pendingPermission: null });
   },
+
+  endSession: async (sessionId: string) => {
+    try {
+      await tauriInvoke<void>('end_acp_session', { sessionId });
+      console.log('[ChatStore] ACP session ended:', sessionId);
+    } catch (error) {
+      console.error('[ChatStore] Failed to end ACP session:', error);
+    }
+  },
 }));
 
 // Initialize Tauri event listeners
@@ -436,6 +466,15 @@ export function initializeChatListeners() {
     useChatStore.setState({ isStreaming: false });
   }).then((unlisten) => {
     console.log('[ChatStore] error listener registered');
+    unlistenFns.push(unlisten);
+  });
+
+  // Listen for agent models discovered from ACP session/new
+  tauriListen<{ command: string; models: string[] }>('acp:models', (payload) => {
+    console.log('[ChatStore] Received models from ACP:', payload);
+    useAcpStore.getState().updateDiscoveredAgentModels(payload.command, payload.models);
+  }).then((unlisten) => {
+    console.log('[ChatStore] acp:models listener registered');
     unlistenFns.push(unlisten);
   });
 

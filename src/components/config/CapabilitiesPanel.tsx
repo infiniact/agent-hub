@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Search, X } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 import { Badge } from "@/components/ui/Badge";
 
 interface Capability {
@@ -37,7 +37,7 @@ export function CapabilitiesPanel() {
         </div>
       </div>
       <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-gray-500 size-5" />
+        <Codicon name="search" className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-gray-500 text-[20px]" />
         <input
           type="text"
           value={searchQuery}
@@ -56,9 +56,10 @@ export function CapabilitiesPanel() {
                 : "bg-purple-500/10 text-purple-400 border border-purple-500/30"
             }`}
           >
+            {cap.type === "mcp" && <Codicon name="mcp" className="text-[12px]" />}
             {cap.name}
             <button onClick={() => removeCapability(cap.id)} className="hover:opacity-70">
-              <X className="size-3" />
+              <Codicon name="close" className="text-[12px]" />
             </button>
           </span>
         ))}

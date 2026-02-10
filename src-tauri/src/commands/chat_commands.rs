@@ -69,7 +69,7 @@ pub async fn send_prompt(
         // Auto-start the agent
         log::info!("Agent not running, attempting to auto-start...");
 
-        let mut acp_command = agent_config.acp_command.ok_or_else(|| {
+        let mut acp_command = agent_config.acp_command.clone().ok_or_else(|| {
             let msg = format!("Agent {} has no ACP command configured", agent_id);
             log::warn!("{}", msg);
             app.emit("acp:error", &serde_json::json!({
@@ -143,8 +143,11 @@ pub async fn send_prompt(
 
         log::info!("Spawning agent: command={}, args={:?}", acp_command, args);
 
+        // Build extra environment variables from dynamic registry
+        let extra_env = crate::acp::discovery::get_agent_env_for_command(&acp_command).await;
+
         // Spawn the agent process
-        let process = crate::acp::manager::spawn_agent_process(&agent_id, &acp_command, &args).await?;
+        let process = crate::acp::manager::spawn_agent_process(&agent_id, &acp_command, &args, &extra_env, &acp_command).await?;
         let stdin_handle = process.stdin.clone();
         log::info!("Agent process spawned: {}", agent_id);
 
@@ -175,63 +178,76 @@ pub async fn send_prompt(
     }
 
     // Check if there's an active ACP session
-    let acp_session_id = {
+    let acp_session_info = {
         let acp_sessions = state.acp_sessions.lock().await;
-        if let Some(acp_info) = acp_sessions.get(&session_id) {
-            log::info!("Existing ACP session found: {}", acp_info.acp_session_id);
-            Some(acp_info.acp_session_id.clone())
-        } else {
-            None
-        }
+        acp_sessions.get(&session_id).cloned()
     };
 
-    let acp_session_id = if let Some(id) = acp_session_id {
-        id
+    let acp_session_id = if let Some(info) = acp_session_info {
+        // Session exists in our state - check if it's usable
+        if info.is_usable() {
+            log::info!("Found existing ACP session: {} (state: {})", info.acp_session_id, info.state);
+            // Mark as active on use
+            let mut acp_sessions = state.acp_sessions.lock().await;
+            if let Some(s) = acp_sessions.get_mut(&session_id) {
+                s.mark_active();
+            }
+            info.acp_session_id.clone()
+        } else {
+            log::info!("Existing session state is {}, creating new session", info.state);
+            // Session is ended, remove and create new
+            let mut acp_sessions = state.acp_sessions.lock().await;
+            acp_sessions.remove(&session_id);
+            drop(acp_sessions);
+            create_new_acp_session(
+                &app,
+                &state,
+                &agent_id,
+                &agent_config,
+                &session_id,
+            ).await?
+        }
     } else {
-        // No ACP session exists - we need to create one
-        log::info!("No ACP session found, need to create one");
+        // No ACP session for this session_id — check for a temp session from get_agent_models
+        let temp_key = format!("temp:{}", agent_id);
+        let temp_acp_id = {
+            let acp_sessions = state.acp_sessions.lock().await;
+            acp_sessions.get(&temp_key).map(|info| info.acp_session_id.clone())
+        };
 
-        // Create ACP session
-        let mut processes = state.agent_processes.lock().await;
-        if let Some(process) = processes.get_mut(&agent_id) {
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".into());
+        if let Some(temp_id) = temp_acp_id {
+            log::info!("Reusing temporary ACP session from get_agent_models: {}", temp_id);
 
-            let acp_id = crate::acp::client::create_session(process, &cwd).await?;
-            log::info!("Created ACP session: {}", acp_id);
+            // Move the temp session to the actual session
+            let mut acp_sessions = state.acp_sessions.lock().await;
+            if let Some(mut info) = acp_sessions.remove(&temp_key) {
+                info.session_id = session_id.clone();
+                info.mark_active();
+                acp_sessions.insert(session_id.clone(), info);
+            }
+            drop(acp_sessions);
 
             // Update session in DB
             let state_clone = state.inner().clone();
             let session_id_clone = session_id.clone();
-            let acp_id_clone = acp_id.clone();
+            let temp_id_clone = temp_id.clone();
             tokio::task::spawn_blocking(move || {
-                session_repo::update_session_acp_id(&state_clone, &session_id_clone, &acp_id_clone)
+                session_repo::update_session_acp_id(&state_clone, &session_id_clone, &temp_id_clone)
             })
             .await
             .map_err(|e| AppError::Internal(e.to_string()))??;
 
-            // Track in state
-            let mut acp_sessions = state.acp_sessions.lock().await;
-            acp_sessions.insert(
-                session_id.clone(),
-                crate::state::AcpSessionInfo {
-                    session_id: session_id.clone(),
-                    agent_id: agent_id.clone(),
-                    acp_session_id: acp_id.clone(),
-                },
-            );
-            drop(acp_sessions);
-            drop(processes);
-            acp_id
+            temp_id
         } else {
-            let err_msg = format!("Agent {} process not found", agent_id);
-            log::warn!("{}", err_msg);
-            let _ = app.emit("acp:error", &serde_json::json!({
-                "error": "AgentNotFound",
-                "message": err_msg
-            }));
-            return Ok(user_msg);
+            // No temp session either, create a brand new one
+            log::info!("No ACP session found, creating new session");
+            create_new_acp_session(
+                &app,
+                &state,
+                &agent_id,
+                &agent_config,
+                &session_id,
+            ).await?
         }
     };
 
@@ -476,4 +492,61 @@ pub async fn respond_permission(
 
     log::info!("Permission response sent successfully");
     Ok(())
+}
+
+/// Helper function to create a new ACP session following the ACP protocol.
+/// This creates a session/new request and tracks the session in state.
+async fn create_new_acp_session(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    agent_id: &str,
+    agent_config: &AgentConfig,
+    session_id: &str,
+) -> AppResult<String> {
+    log::info!("Creating new ACP session for agent {}", agent_id);
+
+    let mut processes = state.agent_processes.lock().await;
+    let process = processes.get_mut(agent_id)
+        .ok_or_else(|| AppError::Internal(format!("Agent {} process not found", agent_id)))?;
+
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".into());
+
+    log::info!("Calling create_session for agent {}", agent_id);
+    let (acp_id, models) = crate::acp::client::create_session(process, &cwd).await?;
+    log::info!("Created ACP session: {} with {} models", acp_id, models.len());
+
+    drop(processes);
+
+    // Emit models to frontend for updating the discovered agents list
+    let command = agent_config.acp_command.clone().unwrap_or_default();
+    let model_ids: Vec<String> = models.iter().map(|m| m.model_id.clone()).collect();
+    let _ = app.emit("acp:models", &serde_json::json!({
+        "command": command,
+        "models": model_ids
+    }));
+
+    // Update session in DB - clone the session_id for the spawned task
+    let session_id_owned = session_id.to_string();
+    let state_clone = state.clone();
+    let acp_id_clone = acp_id.clone();
+    tokio::task::spawn_blocking(move || {
+        session_repo::update_session_acp_id(&state_clone, &session_id_owned, &acp_id_clone)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
+
+    // Track in state with proper AcpSessionInfo
+    let mut acp_sessions = state.acp_sessions.lock().await;
+    acp_sessions.insert(
+        session_id.to_string(),
+        crate::state::AcpSessionInfo::new(
+            session_id.to_string(),
+            agent_id.to_string(),
+            acp_id.clone(),
+        ),
+    );
+
+    Ok(acp_id)
 }

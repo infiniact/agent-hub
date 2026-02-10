@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { Image as ImageIcon, FileText, Mic, Send, Crown, User } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { Codicon } from "@/components/ui/Codicon";
 import { useChatStore } from "@/stores/chatStore";
 import { useAgentStore } from "@/stores/agentStore";
 import { useOrchestrationStore } from "@/stores/orchestrationStore";
@@ -18,12 +18,16 @@ export function ChatInput() {
   const controlHubAgentId = useAgentStore((s) => s.controlHubAgentId);
   const isOrchestrating = useOrchestrationStore((s) => s.isOrchestrating);
   const startOrchestration = useOrchestrationStore((s) => s.startOrchestration);
+  const continueOrchestration = useOrchestrationStore((s) => s.continueOrchestration);
+  const activeTaskRun = useOrchestrationStore((s) => s.activeTaskRun);
 
   const isOrchestrationMode = !!controlHubAgentId;
+  const isTaskCompleted = activeTaskRun &&
+    ['completed', 'failed', 'cancelled'].includes(activeTaskRun.status);
   const selectedAgent = agents.find((a) => a.id === selectedAgentId);
   const hubAgent = agents.find((a) => a.id === controlHubAgentId);
 
-  const handleSend = async () => {
+  const handleSend = useCallback(async () => {
     const trimmedText = text.trim();
     console.log('[ChatInput] handleSend called:', {
       hasText: !!trimmedText,
@@ -35,6 +39,18 @@ export function ChatInput() {
     });
 
     if (!trimmedText || isStreaming || isOrchestrating) {
+      return;
+    }
+
+    // Continue mode: task completed/failed/cancelled, send supplementary instructions
+    if (isTaskCompleted) {
+      console.log('[ChatInput] Continuing orchestration with additional instructions...');
+      try {
+        await continueOrchestration(trimmedText);
+        setText("");
+      } catch (e) {
+        console.error('[ChatInput] Failed to continue orchestration:', e);
+      }
       return;
     }
 
@@ -72,9 +88,12 @@ export function ChatInput() {
     } catch (e) {
       console.error('[ChatInput] Failed to send prompt:', e);
     }
-  };
+  }, [text, isStreaming, isOrchestrating, isTaskCompleted, isOrchestrationMode,
+      currentSessionId, selectedAgentId, continueOrchestration, startOrchestration,
+      ensureSession, sendPrompt]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return;
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
       handleSend();
@@ -92,14 +111,14 @@ export function ChatInput() {
         <div className="flex items-center gap-2 mb-2 px-1">
           {isOrchestrationMode ? (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/20">
-              <Crown className="size-3 text-amber-400" />
+              <Codicon name="star-full" className="text-[12px] text-amber-400" />
               <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider">
                 Control Hub: {hubAgent?.name ?? "Unknown"}
               </span>
             </div>
           ) : (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-primary/10 border border-primary/20">
-              <User className="size-3 text-primary" />
+              <Codicon name="account" className="text-[12px] text-primary" />
               <span className="text-[10px] font-bold text-primary uppercase tracking-wider">
                 Direct: {selectedAgent?.name ?? "No agent"}
               </span>
@@ -115,7 +134,9 @@ export function ChatInput() {
             onKeyDown={handleKeyDown}
             className="w-full bg-transparent border-none text-slate-900 dark:text-white px-4 py-4 min-h-[100px] text-sm focus:ring-0 placeholder:text-slate-400 font-body resize-none outline-none"
             placeholder={
-              isOrchestrationMode
+              isTaskCompleted
+                ? "Add context or instructions to restart..."
+                : isOrchestrationMode
                 ? "Describe a task for the Control Hub to orchestrate..."
                 : "Type your message..."
             }
@@ -126,19 +147,19 @@ export function ChatInput() {
                 className="size-9 rounded-lg hover:bg-slate-200/50 dark:hover:bg-white/10 flex items-center justify-center text-slate-400 transition-colors"
                 title="Attach image"
               >
-                <ImageIcon className="size-5" />
+                <Codicon name="file-media" className="text-[20px]" />
               </button>
               <button
                 className="size-9 rounded-lg hover:bg-slate-200/50 dark:hover:bg-white/10 flex items-center justify-center text-slate-400 transition-colors"
                 title="Upload file"
               >
-                <FileText className="size-5" />
+                <Codicon name="file" className="text-[20px]" />
               </button>
               <button
                 className="size-9 rounded-lg hover:bg-slate-200/50 dark:hover:bg-white/10 flex items-center justify-center text-slate-400 transition-colors"
                 title="Voice input"
               >
-                <Mic className="size-5" />
+                <Codicon name="unmute" className="text-[20px]" />
               </button>
             </div>
             <div className="flex items-center gap-3">
@@ -150,7 +171,13 @@ export function ChatInput() {
                 disabled={!text.trim() || isStreaming || isOrchestrating}
                 className="h-9 px-5 bg-primary hover:bg-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed text-background-dark rounded-lg flex items-center gap-2 font-bold text-xs transition-all shadow-lg shadow-primary/20"
               >
-                {isOrchestrationMode ? "Orchestrate" : "Send"} <Send className="size-4" />
+                {isTaskCompleted ? (
+                  <>Continue <Codicon name="debug-restart" /></>
+                ) : isOrchestrationMode ? (
+                  <>Orchestrate <Codicon name="arrow-right" /></>
+                ) : (
+                  <>Send <Codicon name="arrow-right" /></>
+                )}
               </button>
             </div>
           </div>

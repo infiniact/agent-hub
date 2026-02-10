@@ -4,5 +4,6 @@ pub mod filesystem;
 pub mod manager;
 pub mod orchestrator;
 pub mod permissions;
+pub mod provisioner;
 pub mod terminal;
 pub mod transport;

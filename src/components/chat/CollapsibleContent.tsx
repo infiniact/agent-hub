@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, type ReactNode } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 
 interface CollapsibleContentProps {
   children: ReactNode;
@@ -61,12 +61,12 @@ export function CollapsibleContent({
         >
           {isExpanded ? (
             <>
-              <ChevronUp className="size-3" />
+              <Codicon name="chevron-up" className="text-[12px]" />
               <span>收起</span>
             </>
           ) : (
             <>
-              <ChevronDown className="size-3" />
+              <Codicon name="chevron-down" className="text-[12px]" />
               <span>展开更多</span>
             </>
           )}

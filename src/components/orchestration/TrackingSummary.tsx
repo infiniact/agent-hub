@@ -42,7 +42,10 @@ export function TrackingSummary({ taskRun, agentTracking }: TrackingSummaryProps
                 <th className="text-left py-1.5 pr-3 font-medium">#</th>
                 <th className="text-left py-1.5 pr-3 font-medium">Agent</th>
                 <th className="text-left py-1.5 pr-3 font-medium">Model</th>
+                <th className="text-right py-1.5 pr-3 font-medium">Tokens In</th>
+                <th className="text-right py-1.5 pr-3 font-medium">Tokens Out</th>
                 <th className="text-right py-1.5 pr-3 font-medium">Duration</th>
+                <th className="text-left py-1.5 pr-3 font-medium">Session ID</th>
                 <th className="text-right py-1.5 font-medium">Status</th>
               </tr>
             </thead>
@@ -62,7 +65,16 @@ export function TrackingSummary({ taskRun, agentTracking }: TrackingSummaryProps
                     {entry.model || "--"}
                   </td>
                   <td className="py-1.5 pr-3 text-right text-slate-400 dark:text-gray-500">
+                    {entry.tokensIn || "--"}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right text-slate-400 dark:text-gray-500">
+                    {entry.tokensOut || "--"}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right text-slate-400 dark:text-gray-500">
                     {formatDuration(entry.durationMs)}
+                  </td>
+                  <td className="py-1.5 pr-3 text-slate-400 dark:text-gray-600 font-mono text-[10px] max-w-[80px] truncate">
+                    {entry.acpSessionId ? entry.acpSessionId.slice(0, 12) : "--"}
                   </td>
                   <td className="py-1.5 text-right">
                     <span

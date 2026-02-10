@@ -52,6 +52,7 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
     let migrations: Vec<(&str, &str)> = vec![
         ("001_initial", include_str!("../../migrations/001_initial.sql")),
         ("002_orchestration", include_str!("../../migrations/002_orchestration.sql")),
+        ("003_agent_features", include_str!("../../migrations/003_agent_features.sql")),
     ];
 
     for (name, sql) in migrations {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, X, ChevronDown, ChevronUp } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 
 interface PermissionRequest {
   id: number | string;
@@ -98,9 +98,9 @@ export function InlinePermission({ request, onResponse, onDismiss }: InlinePermi
             className="size-6 flex items-center justify-center rounded hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
           >
             {expanded ? (
-              <ChevronUp className="size-3.5 text-amber-700 dark:text-amber-400" />
+              <Codicon name="chevron-up" className="text-[14px] text-amber-700 dark:text-amber-400" />
             ) : (
-              <ChevronDown className="size-3.5 text-amber-700 dark:text-amber-400" />
+              <Codicon name="chevron-down" className="text-[14px] text-amber-700 dark:text-amber-400" />
             )}
           </button>
         </div>
@@ -147,7 +147,7 @@ export function InlinePermission({ request, onResponse, onDismiss }: InlinePermi
                 onClick={() => setUserMessage("")}
                 className="absolute right-2 top-1/2 -translate-y-1/2 size-4 flex items-center justify-center rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400"
               >
-                <X className="size-3" />
+                <Codicon name="close" className="text-[12px]" />
               </button>
             )}
           </div>
@@ -168,7 +168,7 @@ export function InlinePermission({ request, onResponse, onDismiss }: InlinePermi
               <span className="inline-block size-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             ) : (
               <>
-                <Check className="size-3.5" />
+                <Codicon name="check" className="text-[14px]" />
                 {request.options.find((o) => o.optionId === selectedOption)?.name || "Submit"}
               </>
             )}

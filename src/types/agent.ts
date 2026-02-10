@@ -14,6 +14,8 @@ export interface AgentConfig {
   acp_args_json: string | null;
   is_control_hub: boolean;
   md_file_path: string | null;
+  max_concurrency: number;
+  available_models_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -31,6 +33,7 @@ export interface CreateAgentRequest {
   acp_command?: string;
   acp_args_json?: string;
   is_control_hub?: boolean;
+  max_concurrency?: number;
 }
 
 export interface UpdateAgentRequest {
@@ -47,6 +50,8 @@ export interface UpdateAgentRequest {
   acp_command?: string;
   acp_args_json?: string;
   is_control_hub?: boolean;
+  max_concurrency?: number;
+  available_models_json?: string;
 }
 
 export interface DiscoveredAgent {
@@ -58,4 +63,14 @@ export interface DiscoveredAgent {
   source_path: string;
   last_seen_at: string;
   available: boolean;
+  models: string[];
+  registry_id: string | null;
+  icon_url: string | null;
+  description: string;
+}
+
+export interface AgentModel {
+  model_id: string;
+  name: string;
+  description: string | null;
 }

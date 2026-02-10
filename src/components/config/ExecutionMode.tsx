@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { PlayCircle, Calendar, RefreshCw } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 import { cn } from "@/lib/cn";
 
 const modes = [
@@ -9,21 +9,21 @@ const modes = [
     id: "RunNow",
     label: "Run Now",
     description: "Manual execution on demand.",
-    Icon: PlayCircle,
+    icon: "play",
     color: "bg-primary/10 text-primary",
   },
   {
     id: "Schedule",
     label: "Schedule",
     description: "Execute at specific times.",
-    Icon: Calendar,
+    icon: "calendar",
     color: "bg-emerald-500/10 text-emerald-400",
   },
   {
     id: "Automate",
     label: "Automate",
     description: "Loop based on triggers.",
-    Icon: RefreshCw,
+    icon: "refresh",
     color: "bg-purple-500/10 text-purple-400",
   },
 ];
@@ -37,7 +37,7 @@ export function ExecutionMode() {
         Execution Mode
       </h3>
       <div className="grid grid-cols-3 gap-4">
-        {modes.map(({ id, label, description, Icon, color }) => (
+        {modes.map(({ id, label, description, icon, color }) => (
           <div
             key={id}
             onClick={() => setActive(id)}
@@ -47,7 +47,7 @@ export function ExecutionMode() {
             )}
           >
             <div className={cn("size-10 rounded-lg flex items-center justify-center", color)}>
-              <Icon className="size-5" />
+              <Codicon name={icon} className="text-[20px]" />
             </div>
             <div>
               <p className="font-bold text-sm text-slate-900 dark:text-white">{label}</p>

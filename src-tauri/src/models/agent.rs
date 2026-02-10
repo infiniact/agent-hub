@@ -17,6 +17,8 @@ pub struct AgentConfig {
     pub acp_args_json: Option<String>,
     pub is_control_hub: bool,
     pub md_file_path: Option<String>,
+    pub max_concurrency: i64,
+    pub available_models_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -44,6 +46,8 @@ pub struct CreateAgentRequest {
     pub acp_args_json: Option<String>,
     #[serde(default)]
     pub is_control_hub: bool,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +65,8 @@ pub struct UpdateAgentRequest {
     pub acp_command: Option<String>,
     pub acp_args_json: Option<String>,
     pub is_control_hub: Option<bool>,
+    pub max_concurrency: Option<i64>,
+    pub available_models_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +81,18 @@ pub struct DiscoveredAgent {
     /// Whether this agent is actually installed / available on the system.
     #[serde(default)]
     pub available: bool,
+    /// Known model list for this CLI identity.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Registry entry ID (e.g. "claude-code-acp", "gemini").
+    #[serde(default)]
+    pub registry_id: Option<String>,
+    /// Agent icon URL from registry.
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// Agent description from registry.
+    #[serde(default)]
+    pub description: String,
 }
 
 fn default_icon() -> String {
@@ -94,4 +112,7 @@ fn default_max_tokens() -> i64 {
 }
 fn default_capabilities() -> String {
     "[]".into()
+}
+fn default_max_concurrency() -> i64 {
+    1
 }

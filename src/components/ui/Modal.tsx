@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/cn";
-import { X } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 import { useEffect } from "react";
 
 interface ModalProps {
@@ -38,7 +38,7 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
             onClick={onClose}
             className="size-8 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 flex items-center justify-center text-slate-400"
           >
-            <X className="size-4" />
+            <Codicon name="close" />
           </button>
         </div>
         {children}

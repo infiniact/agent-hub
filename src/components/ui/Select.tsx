@@ -2,7 +2,7 @@
 
 import { cn } from "@/lib/cn";
 import { useState, useRef, useEffect } from "react";
-import { ChevronDown } from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
 
 interface SelectOption {
   label: string;
@@ -38,7 +38,7 @@ export function Select({ value, options, onChange, className }: SelectProps) {
         className="w-full h-9 flex items-center justify-between px-3 bg-white dark:bg-background-dark border border-slate-200 dark:border-border-dark rounded-lg text-sm text-slate-900 dark:text-white"
       >
         <span>{selected?.label ?? value}</span>
-        <ChevronDown className="size-4 text-slate-400" />
+        <Codicon name="chevron-down" className="text-slate-400" />
       </button>
       {open && (
         <div className="absolute top-[calc(100%+4px)] left-0 w-full bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-lg shadow-xl z-50 py-1 max-h-64 overflow-y-auto">

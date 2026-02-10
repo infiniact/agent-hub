@@ -2,33 +2,22 @@
 
 import { useAgentStore } from "@/stores/agentStore";
 import { useAcpStore } from "@/stores/acpStore";
-import {
-  Code,
-  Search,
-  Terminal,
-  Brain,
-  Shield,
-  Plus,
-  Rocket,
-  Database,
-  Sparkles,
-  Landmark,
-  Crown,
-} from "lucide-react";
+import { Codicon } from "@/components/ui/Codicon";
+import { McpIcon } from "@/components/icons/McpIcon";
 import { cn } from "@/lib/cn";
 import { useEffect, useState } from "react";
 import { isTauri } from "@/lib/tauri";
 
-const iconMap: Record<string, React.ReactNode> = {
-  code: <Code className="size-5" />,
-  manage_search: <Search className="size-5" />,
-  terminal: <Terminal className="size-5" />,
-  psychology: <Brain className="size-5" />,
-  shield: <Shield className="size-5" />,
-  rocket_launch: <Rocket className="size-5" />,
-  database: <Database className="size-5" />,
-  auto_awesome: <Sparkles className="size-5" />,
-  architecture: <Landmark className="size-5" />,
+const iconMap: Record<string, string> = {
+  code: "code",
+  manage_search: "search",
+  terminal: "terminal",
+  psychology: "lightbulb",
+  shield: "shield",
+  rocket_launch: "rocket",
+  database: "database",
+  auto_awesome: "sparkle",
+  architecture: "library",
 };
 
 export function NavBar() {
@@ -39,6 +28,7 @@ export function NavBar() {
   const createAgent = useAgentStore((s) => s.createAgent);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const setControlHub = useAgentStore((s) => s.setControlHub);
+  const deleteAgent = useAgentStore((s) => s.deleteAgent);
   const controlHubAgentId = useAgentStore((s) => s.controlHubAgentId);
   const discoveredAgents = useAcpStore((s) => s.discoveredAgents);
   const scanForAgents = useAcpStore((s) => s.scanForAgents);
@@ -99,7 +89,7 @@ export function NavBar() {
             icon: 'code',
             description: `Auto-discovered agent from ${discovered.source_path}`,
             execution_mode: 'RunNow',
-            model: 'gpt-4',
+            model: discovered.models?.[0] ?? '',
             temperature: 0.7,
             max_tokens: 4096,
             system_prompt: 'You are a helpful AI assistant.',
@@ -120,7 +110,7 @@ export function NavBar() {
             icon: 'code',
             description: 'A general-purpose AI agent. Configure the ACP command to enable auto-start.',
             execution_mode: 'RunNow',
-            model: 'gpt-4',
+            model: '',
             temperature: 0.7,
             max_tokens: 4096,
             system_prompt: 'You are a helpful coding assistant.',
@@ -160,7 +150,18 @@ export function NavBar() {
   };
 
   return (
-    <div className="flex-none h-12 bg-white dark:bg-[#07070C] border-b border-slate-200 dark:border-border-dark flex items-center px-6 justify-center z-40 overflow-visible">
+    <div className="h-12 shrink-0 bg-white dark:bg-[#07070C] border-b border-slate-200 dark:border-border-dark flex items-center px-4 justify-between">
+      {/* Left: Session management */}
+      <div className="flex items-center">
+        <button
+          className="size-8 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 flex items-center justify-center text-slate-400 dark:text-gray-500 hover:text-primary transition-colors"
+          title="Sessions"
+        >
+          <Codicon name="comment-discussion" />
+        </button>
+      </div>
+
+      {/* Center: Agent tabs */}
       <div className="flex items-center gap-3">
         {agents.map((agent) => (
           <div
@@ -168,6 +169,7 @@ export function NavBar() {
             className="relative group cursor-pointer"
             onClick={() => selectAgent(agent.id)}
             onContextMenu={(e) => handleContextMenu(e, agent.id)}
+            title={agent.name}
           >
             <div
               className={cn(
@@ -177,15 +179,33 @@ export function NavBar() {
                   : "bg-white dark:bg-surface-dark border border-slate-200 dark:border-white/5 hover:border-primary/50 text-slate-400 dark:text-gray-400 hover:text-primary"
               )}
             >
-              {iconMap[agent.icon] ?? <Code className="size-5" />}
+              <Codicon name={iconMap[agent.icon] ?? "code"} className="text-[20px]" />
             </div>
-            {agent.status === "Running" && (
+            {/* Delete button on hover */}
+            {agents.length > 1 && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const id = agent.id;
+                  deleteAgent(id).then(() => {
+                    const remaining = useAgentStore.getState().agents;
+                    if (useAgentStore.getState().selectedAgentId === null && remaining.length > 0) {
+                      selectAgent(remaining[0].id);
+                    }
+                  }).catch((err) => console.error('[NavBar] delete failed:', err));
+                }}
+                className="absolute -top-1.5 -right-1.5 size-4 rounded-full bg-slate-300 dark:bg-gray-600 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-rose-500 transition-all"
+              >
+                <Codicon name="close" className="text-[10px]" />
+              </button>
+            )}
+            {agent.status === "Running" && !agents.length && (
               <div className="status-dot absolute -top-0.5 -right-0.5 size-2 rounded-full border border-background-dark bg-primary" />
             )}
             {/* Crown icon for Control Hub */}
             {agent.is_control_hub && (
               <div className="absolute -top-1.5 -left-1.5">
-                <Crown className="size-3 text-amber-400 fill-amber-400" />
+                <Codicon name="star-full" className="text-[12px] text-amber-400" />
               </div>
             )}
           </div>
@@ -193,7 +213,7 @@ export function NavBar() {
         {agents.length === 0 && (
           <div className="relative group cursor-pointer">
             <div className="size-8 rounded-lg bg-primary text-background-dark flex items-center justify-center shadow-[0_0_10px_rgba(0,229,255,0.3)]">
-              <Code className="size-5" />
+              <Codicon name="code" className="text-[20px]" />
             </div>
             <div className="status-dot absolute -top-0.5 -right-0.5 size-2 rounded-full border border-background-dark bg-primary" />
           </div>
@@ -213,7 +233,7 @@ export function NavBar() {
                   ? `Agent using ${best.name}`
                   : 'New AI agent. Configure the ACP command to enable.',
                 execution_mode: 'RunNow',
-                model: 'gpt-4',
+                model: best?.models?.[0] ?? '',
                 temperature: 0.7,
                 max_tokens: 4096,
                 system_prompt: 'You are a helpful AI assistant.',
@@ -228,7 +248,23 @@ export function NavBar() {
           }}
           className="size-8 rounded-lg border border-slate-300 dark:border-border-dark bg-white dark:bg-surface-dark hover:border-primary hover:text-primary text-slate-400 dark:text-gray-500 flex items-center justify-center transition-colors"
         >
-          <Plus className="size-4" />
+          <Codicon name="add" />
+        </button>
+      </div>
+
+      {/* Right: MCP + Skill management */}
+      <div className="flex items-center gap-1">
+        <button
+          className="size-8 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 flex items-center justify-center text-slate-400 dark:text-gray-500 hover:text-primary transition-colors"
+          title="MCP Servers"
+        >
+          <McpIcon className="size-4" />
+        </button>
+        <button
+          className="size-8 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 flex items-center justify-center text-slate-400 dark:text-gray-500 hover:text-primary transition-colors"
+          title="Skills"
+        >
+          <Codicon name="zap" />
         </button>
       </div>
 
@@ -245,9 +281,31 @@ export function NavBar() {
             }}
             className="w-full text-left px-3 py-1.5 text-xs hover:bg-slate-100 dark:hover:bg-white/5 flex items-center gap-2"
           >
-            <Crown className="size-3 text-amber-400" />
+            <Codicon name="star-full" className="text-[12px] text-amber-400" />
             {controlHubAgentId === contextMenu.agentId ? "Remove Control Hub" : "Set as Control Hub"}
           </button>
+          {agents.length > 1 && (
+            <button
+              onClick={async () => {
+                const id = contextMenu.agentId;
+                setContextMenu(null);
+                try {
+                  await deleteAgent(id);
+                  // If the deleted agent was selected, auto-select another
+                  const remaining = useAgentStore.getState().agents;
+                  if (useAgentStore.getState().selectedAgentId === null && remaining.length > 0) {
+                    selectAgent(remaining[0].id);
+                  }
+                } catch (e) {
+                  console.error('[NavBar] Failed to delete agent:', e);
+                }
+              }}
+              className="w-full text-left px-3 py-1.5 text-xs hover:bg-rose-50 dark:hover:bg-rose-500/10 text-rose-500 flex items-center gap-2"
+            >
+              <Codicon name="trash" className="text-[12px]" />
+              Delete Agent
+            </button>
+          )}
         </div>
       )}
     </div>
