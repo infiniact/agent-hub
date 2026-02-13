@@ -7,6 +7,7 @@ interface SettingsState {
   fontSize: number;
   settings: Record<string, string>;
   loaded: boolean;
+  workingDirectory: string | null;
 }
 
 interface SettingsActions {
@@ -15,6 +16,8 @@ interface SettingsActions {
   toggleTheme: () => void;
   setLanguage: (lang: string) => void;
   setFontSize: (size: number) => void;
+  selectWorkingDirectory: () => Promise<string | null>;
+  loadWorkingDirectory: () => Promise<void>;
 }
 
 function applyThemeClass(theme: 'dark' | 'light') {
@@ -36,6 +39,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
   fontSize: 14,
   settings: {},
   loaded: false,
+  workingDirectory: null,
 
   loadSettings: async () => {
     try {
@@ -108,5 +112,27 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
         console.error('Failed to persist font size setting:', error);
       }
     );
+  },
+
+  selectWorkingDirectory: async () => {
+    try {
+      const path = await tauriInvoke<string | null>('select_working_directory');
+      if (path) {
+        set({ workingDirectory: path });
+      }
+      return path;
+    } catch (error) {
+      console.error('Failed to select working directory:', error);
+      return null;
+    }
+  },
+
+  loadWorkingDirectory: async () => {
+    try {
+      const path = await tauriInvoke<string | null>('get_working_directory');
+      set({ workingDirectory: path ?? null });
+    } catch (error) {
+      console.error('Failed to load working directory:', error);
+    }
   },
 }));

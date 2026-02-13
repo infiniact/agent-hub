@@ -19,6 +19,8 @@ pub struct AgentConfig {
     pub md_file_path: Option<String>,
     pub max_concurrency: i64,
     pub available_models_json: Option<String>,
+    pub is_enabled: bool,
+    pub disabled_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -50,7 +52,7 @@ pub struct CreateAgentRequest {
     pub max_concurrency: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateAgentRequest {
     pub name: Option<String>,
     pub icon: Option<String>,
@@ -67,6 +69,8 @@ pub struct UpdateAgentRequest {
     pub is_control_hub: Option<bool>,
     pub max_concurrency: Option<i64>,
     pub available_models_json: Option<String>,
+    pub is_enabled: Option<bool>,
+    pub disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +97,12 @@ pub struct DiscoveredAgent {
     /// Agent description from registry.
     #[serde(default)]
     pub description: String,
+    /// ACP adapter version (e.g. "0.16.1").
+    #[serde(default)]
+    pub adapter_version: Option<String>,
+    /// CLI version (e.g. "2.1.39").
+    #[serde(default)]
+    pub cli_version: Option<String>,
 }
 
 fn default_icon() -> String {

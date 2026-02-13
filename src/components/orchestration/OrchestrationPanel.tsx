@@ -6,6 +6,7 @@ import { TaskPlanView } from "./TaskPlanView";
 import { TrackingSummary } from "./TrackingSummary";
 import { InlinePermission } from "@/components/chat/InlinePermission";
 import { Codicon } from "@/components/ui/Codicon";
+import { MarkdownContent } from "@/components/chat/MarkdownContent";
 
 export function OrchestrationPanel() {
   const activeTaskRun = useOrchestrationStore((s) => s.activeTaskRun);
@@ -24,6 +25,9 @@ export function OrchestrationPanel() {
   const respondToOrchPermission = useOrchestrationStore((s) => s.respondToOrchPermission);
   const cancelAgent = useOrchestrationStore((s) => s.cancelAgent);
   const dismissTaskRun = useOrchestrationStore((s) => s.dismissTaskRun);
+  const rateTaskRun = useOrchestrationStore((s) => s.rateTaskRun);
+  const scheduleTask = useOrchestrationStore((s) => s.scheduleTask);
+  const clearSchedule = useOrchestrationStore((s) => s.clearSchedule);
 
   if (!activeTaskRun) {
     return (
@@ -89,7 +93,9 @@ export function OrchestrationPanel() {
       {/* User prompt */}
       <div className="px-3 py-2 rounded-lg bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-border-dark/50">
         <p className="text-xs text-slate-500 dark:text-gray-500 font-medium mb-1">Task</p>
-        <p className="text-sm text-slate-700 dark:text-gray-300">{activeTaskRun.user_prompt}</p>
+        <div className="text-sm text-slate-700 dark:text-gray-300">
+          <MarkdownContent content={activeTaskRun.user_prompt} className="text-sm" />
+        </div>
       </div>
 
       {/* Plan */}
@@ -173,22 +179,15 @@ export function OrchestrationPanel() {
       )}
 
       {/* Completion summary */}
-      {isCompleted && <TrackingSummary taskRun={activeTaskRun} agentTracking={agentTracking} />}
-
-      {/* Continue / Dismiss section */}
       {isCompleted && (
-        <div className="rounded-lg border border-slate-200 dark:border-border-dark/50 bg-slate-50 dark:bg-white/5 px-4 py-3">
-          <p className="text-xs text-slate-500 dark:text-gray-400 mb-2">
-            Type below to continue with additional instructions, or dismiss.
-          </p>
-          <button
-            onClick={dismissTaskRun}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-500 dark:text-gray-400 hover:text-slate-700 dark:hover:text-gray-200 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
-          >
-            <Codicon name="close" className="text-[14px]" />
-            Dismiss
-          </button>
-        </div>
+        <TrackingSummary
+          taskRun={activeTaskRun}
+          agentTracking={agentTracking}
+          onRateTask={rateTaskRun}
+          onRateComplete={dismissTaskRun}
+          onScheduleTask={scheduleTask}
+          onClearSchedule={clearSchedule}
+        />
       )}
     </div>
   );

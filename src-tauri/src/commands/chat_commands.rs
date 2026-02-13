@@ -3,6 +3,7 @@ use tauri::Emitter;
 use crate::db::agent_repo;
 use crate::db::message_repo;
 use crate::db::session_repo;
+use crate::commands::settings_commands;
 use crate::error::{AppError, AppResult};
 use crate::models::agent::AgentConfig;
 use crate::models::message::ChatMessage;
@@ -509,9 +510,7 @@ async fn create_new_acp_session(
     let process = processes.get_mut(agent_id)
         .ok_or_else(|| AppError::Internal(format!("Agent {} process not found", agent_id)))?;
 
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".into());
+    let cwd = settings_commands::resolve_working_directory(state);
 
     log::info!("Calling create_session for agent {}", agent_id);
     let (acp_id, models) = crate::acp::client::create_session(process, &cwd).await?;

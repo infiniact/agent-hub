@@ -9,6 +9,9 @@ pub enum AppError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+
     #[error("ACP error: {0}")]
     Acp(String),
 
@@ -29,6 +32,9 @@ pub enum AppError {
 
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
+
+    #[error("Version upgrade required: {0}")]
+    VersionUpgradeRequired(String),
 
     #[error("Internal error: {0}")]
     Internal(String),

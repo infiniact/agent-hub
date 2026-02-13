@@ -16,6 +16,8 @@ export interface AgentConfig {
   md_file_path: string | null;
   max_concurrency: number;
   available_models_json: string | null;
+  is_enabled: boolean;
+  disabled_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -52,6 +54,8 @@ export interface UpdateAgentRequest {
   is_control_hub?: boolean;
   max_concurrency?: number;
   available_models_json?: string;
+  is_enabled?: boolean;
+  disabled_reason?: string | null;
 }
 
 export interface DiscoveredAgent {
@@ -67,6 +71,8 @@ export interface DiscoveredAgent {
   registry_id: string | null;
   icon_url: string | null;
   description: string;
+  adapter_version: string | null;
+  cli_version: string | null;
 }
 
 export interface AgentModel {

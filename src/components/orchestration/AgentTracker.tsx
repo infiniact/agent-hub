@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { AgentTrackingInfo } from "@/types/orchestration";
 import { Codicon } from "@/components/ui/Codicon";
+import { MarkdownContent } from "@/components/chat/MarkdownContent";
 
 interface AgentTrackerProps {
   info: AgentTrackingInfo;
@@ -67,6 +68,9 @@ export function AgentTracker({
           {(info.tokensIn > 0 || info.tokensOut > 0) && (
             <span>{info.tokensIn} in / {info.tokensOut} out</span>
           )}
+          {(info.cacheCreationTokens > 0 || info.cacheReadTokens > 0) && (
+            <span>cache: {info.cacheReadTokens}r / {info.cacheCreationTokens}w</span>
+          )}
           <span>{durationStr}</span>
           {info.status === "running" && onCancel && (
             <button
@@ -107,8 +111,8 @@ export function AgentTracker({
 
       {/* Streaming preview (when not expanded) */}
       {!isExpanded && isStreaming && info.streamedContent && (
-        <div className="mt-2 max-h-24 overflow-y-auto rounded bg-slate-50 dark:bg-black/20 px-3 py-2 text-xs text-slate-600 dark:text-gray-400 font-mono whitespace-pre-wrap">
-          {info.streamedContent.slice(-500)}
+        <div className="mt-2 max-h-24 overflow-y-auto rounded bg-slate-50 dark:bg-black/20 px-3 py-2 text-xs text-slate-600 dark:text-gray-400">
+          <MarkdownContent content={info.streamedContent.slice(-500)} className="text-xs" />
           <span className="inline-block w-1.5 h-3.5 bg-primary animate-pulse ml-0.5" />
         </div>
       )}
@@ -136,8 +140,8 @@ export function AgentTracker({
               <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-gray-500 mb-1.5">
                 Output
               </p>
-              <div className="max-h-64 overflow-y-auto rounded bg-slate-50 dark:bg-black/20 px-3 py-2 text-xs text-slate-600 dark:text-gray-400 font-mono whitespace-pre-wrap">
-                {info.output || info.streamedContent}
+              <div className="max-h-64 overflow-y-auto rounded bg-slate-50 dark:bg-black/20 px-3 py-2 text-xs text-slate-600 dark:text-gray-400">
+                <MarkdownContent content={info.output || info.streamedContent || ""} className="text-xs" />
                 {isStreaming && (
                   <span className="inline-block w-1.5 h-3.5 bg-primary animate-pulse ml-0.5" />
                 )}

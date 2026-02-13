@@ -47,6 +47,7 @@ capabilities: [{capabilities}]
 acp_command: "{acp_command}"
 acp_args: [{acp_args}]
 is_control_hub: {is_control_hub}
+is_enabled: {is_enabled}
 ---
 
 {system_prompt}
@@ -63,6 +64,7 @@ is_control_hub: {is_control_hub}
         acp_command = agent.acp_command.as_deref().unwrap_or(""),
         acp_args = args_str,
         is_control_hub = agent.is_control_hub,
+        is_enabled = agent.is_enabled,
         system_prompt = agent.system_prompt,
     );
 
@@ -98,6 +100,9 @@ pub fn read_agent_md(path: &str) -> AppResult<AgentConfig> {
     let is_control_hub: bool = extract_field(&frontmatter, "is_control_hub")
         .and_then(|v| v.parse().ok())
         .unwrap_or(false);
+    let is_enabled: bool = extract_field(&frontmatter, "is_enabled")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(true);
     let acp_command = extract_field(&frontmatter, "acp_command")
         .filter(|s| !s.is_empty());
 
@@ -130,6 +135,8 @@ pub fn read_agent_md(path: &str) -> AppResult<AgentConfig> {
         md_file_path: Some(path.to_string()),
         max_concurrency,
         available_models_json: None,
+        is_enabled,
+        disabled_reason: None,
         created_at: String::new(),
         updated_at: String::new(),
     })
@@ -162,6 +169,11 @@ pub fn write_agents_registry(agents: &[AgentConfig]) -> AppResult<PathBuf> {
     let mut content = String::from("# Agents Registry\n\n");
 
     for agent in agents {
+        // Skip disabled agents from the registry so the hub won't see them
+        if !agent.is_enabled {
+            continue;
+        }
+
         let caps: Vec<String> = serde_json::from_str(&agent.capabilities_json)
             .unwrap_or_default();
         let caps_str = if caps.is_empty() {

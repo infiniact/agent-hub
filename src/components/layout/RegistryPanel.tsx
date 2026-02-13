@@ -171,6 +171,20 @@ export function RegistryPanel({ open, onClose, anchorRef }: RegistryPanelProps) 
                 <p className="text-[11px] text-slate-400 dark:text-gray-500 truncate leading-tight mt-0.5">
                   {d.description || d.registry_id}
                 </p>
+                {(d.adapter_version || d.cli_version) && (
+                  <div className="flex items-center gap-2 mt-0.5">
+                    {d.adapter_version && (
+                      <span className="text-[10px] text-slate-400 dark:text-gray-600 font-mono">
+                        ACP {d.adapter_version}
+                      </span>
+                    )}
+                    {d.cli_version && (
+                      <span className="text-[10px] text-slate-400 dark:text-gray-600 font-mono">
+                        CLI {d.cli_version}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Status + Actions */}

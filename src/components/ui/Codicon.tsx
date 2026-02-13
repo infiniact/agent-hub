@@ -2,6 +2,7 @@
 
 import { cn } from "@/lib/cn";
 import { McpIcon } from "@/components/icons/McpIcon";
+import { KanbanIcon } from "@/components/icons/KanbanIcon";
 
 interface CodiconProps extends React.HTMLAttributes<HTMLElement> {
   /** Codicon icon name, e.g. "add", "search", "close" */
@@ -15,10 +16,14 @@ interface CodiconProps extends React.HTMLAttributes<HTMLElement> {
  *
  * Custom icons (not in the codicon font) are rendered as inline SVGs:
  *   - "mcp" → MCP protocol icon
+ *   - "kanban" → Kanban board icon
  */
 export function Codicon({ name, className, ...rest }: CodiconProps) {
   if (name === "mcp") {
     return <McpIcon className={cn("inline-block size-[1em]", className)} />;
+  }
+  if (name === "kanban") {
+    return <KanbanIcon className={cn("inline-block size-[1em]", className)} />;
   }
   return <i className={cn("codicon", `codicon-${name}`, className)} {...rest} />;
 }

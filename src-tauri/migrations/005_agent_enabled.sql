@@ -1,0 +1,2 @@
+ALTER TABLE agents ADD COLUMN is_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE agents ADD COLUMN disabled_reason TEXT;

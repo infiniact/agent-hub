@@ -2,7 +2,7 @@ use crate::acp::orchestrator;
 use crate::db::{agent_repo, task_run_repo};
 use crate::error::{AppError, AppResult};
 use crate::models::agent::AgentConfig;
-use crate::models::task_run::{CreateTaskRunRequest, TaskAssignment, TaskRun};
+use crate::models::task_run::{CreateTaskRunRequest, ScheduleTaskRequest, TaskAssignment, TaskRun};
 use crate::state::{AppState, ConfirmationAction};
 use tokio_util::sync::CancellationToken;
 
@@ -130,6 +130,23 @@ pub async fn confirm_orchestration(
     }
 }
 
+/// Rate a completed task run (1-5 stars)
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rate_task_run(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+    rating: i32,
+) -> AppResult<()> {
+    if rating < 1 || rating > 5 {
+        return Err(AppError::InvalidRequest(
+            "Rating must be between 1 and 5 stars".to_string()
+        ));
+    }
+
+    task_run_repo::rate_task_run(&state, &task_run_id, rating)?;
+    Ok(())
+}
+
 /// User requests re-running a single agent, or all agents if agent_id is "__all__"
 #[tauri::command(rename_all = "camelCase")]
 pub async fn regenerate_agent(
@@ -190,4 +207,140 @@ pub async fn cancel_agent(
     } else {
         Err(AppError::NotFound("No active agent".into()))
     }
+}
+
+// ============== Scheduling Commands ==============
+
+/// Schedule a task for future execution
+#[tauri::command(rename_all = "camelCase")]
+pub async fn schedule_task(
+    state: tauri::State<'_, AppState>,
+    request: ScheduleTaskRequest,
+) -> AppResult<TaskRun> {
+    // Validate schedule type
+    if !["none", "once", "recurring"].contains(&request.schedule_type.as_str()) {
+        return Err(AppError::InvalidRequest(
+            "schedule_type must be 'none', 'once', or 'recurring'".to_string()
+        ));
+    }
+
+    // Get the existing task run
+    let task = {
+        let state_clone = state.inner().clone();
+        let trid = request.task_run_id.clone();
+        tokio::task::spawn_blocking(move || task_run_repo::get_task_run(&state_clone, &trid))
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))??
+    };
+
+    // Only completed tasks can be scheduled
+    if task.status != "completed" {
+        return Err(AppError::InvalidRequest(
+            "Only completed tasks can be scheduled for re-execution".to_string()
+        ));
+    }
+
+    // Calculate next run time based on schedule type
+    let (scheduled_time, recurrence_pattern_json, next_run_at) = match request.schedule_type.as_str() {
+        "none" => (None, None, None),
+        "once" => {
+            let time = request.scheduled_time.clone();
+            // For one-time tasks, next_run_at is the scheduled time
+            let next = time.clone();
+            (time, None, next)
+        }
+        "recurring" => {
+            let pattern = request.recurrence_pattern.as_ref()
+                .ok_or_else(|| AppError::InvalidRequest(
+                    "recurrence_pattern is required for recurring schedule".to_string()
+                ))?;
+
+            let pattern_json = serde_json::to_string(pattern)
+                .map_err(|e| AppError::Internal(format!("Failed to serialize pattern: {}", e)))?;
+
+            // Calculate first next_run_at
+            let next_run = task_run_repo::calculate_next_run(
+                &pattern.frequency,
+                &pattern.time,
+                pattern.interval,
+                pattern.days_of_week.as_ref(),
+                pattern.day_of_month,
+                pattern.month,
+            );
+
+            (request.scheduled_time, Some(pattern_json), next_run)
+        }
+        _ => unreachable!(),
+    };
+
+    // Update the task schedule
+    let state_clone = state.inner().clone();
+    let task_run_id = request.task_run_id.clone();
+    let st = scheduled_time.clone();
+    let rpj = recurrence_pattern_json.clone();
+    let nra = next_run_at.clone();
+    let schedule_type = request.schedule_type.clone();
+
+    let updated_task = tokio::task::spawn_blocking(move || {
+        task_run_repo::update_schedule(
+            &state_clone,
+            &task_run_id,
+            &schedule_type,
+            st.as_deref(),
+            rpj.as_deref(),
+            nra.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
+
+    Ok(updated_task)
+}
+
+/// Pause a scheduled task
+#[tauri::command(rename_all = "camelCase")]
+pub async fn pause_scheduled_task(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+) -> AppResult<()> {
+    let state_clone = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        task_run_repo::pause_scheduled_task(&state_clone, &task_run_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
+
+    Ok(())
+}
+
+/// Resume a paused scheduled task
+#[tauri::command(rename_all = "camelCase")]
+pub async fn resume_scheduled_task(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+) -> AppResult<()> {
+    let state_clone = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        task_run_repo::resume_scheduled_task(&state_clone, &task_run_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
+
+    Ok(())
+}
+
+/// Clear the schedule for a task
+#[tauri::command(rename_all = "camelCase")]
+pub async fn clear_schedule(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+) -> AppResult<()> {
+    let state_clone = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        task_run_repo::clear_schedule(&state_clone, &task_run_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
+
+    Ok(())
 }

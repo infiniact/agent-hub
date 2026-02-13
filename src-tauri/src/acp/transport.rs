@@ -63,6 +63,9 @@ pub async fn receive_message(process: &mut AgentProcess) -> AppResult<serde_json
         .ok_or_else(|| AppError::Transport("Agent stdout channel closed".into()))
 }
 
+/// Default transport timeout in seconds.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
 /// Receive a JSON-RPC response matching a specific request ID.
 /// Skips over notifications (messages with a `method` field but no matching `id`).
 /// Has a timeout to avoid hanging forever if the agent doesn't respond.
@@ -70,7 +73,16 @@ pub async fn receive_response(
     process: &mut AgentProcess,
     expected_id: &serde_json::Value,
 ) -> AppResult<serde_json::Value> {
-    let timeout = std::time::Duration::from_secs(30);
+    receive_response_with_timeout(process, expected_id, DEFAULT_TIMEOUT_SECS).await
+}
+
+/// Like `receive_response`, but with an explicit timeout in seconds.
+pub async fn receive_response_with_timeout(
+    process: &mut AgentProcess,
+    expected_id: &serde_json::Value,
+    timeout_secs: u64,
+) -> AppResult<serde_json::Value> {
+    let timeout = std::time::Duration::from_secs(timeout_secs);
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {

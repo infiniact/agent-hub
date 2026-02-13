@@ -53,6 +53,11 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         ("001_initial", include_str!("../../migrations/001_initial.sql")),
         ("002_orchestration", include_str!("../../migrations/002_orchestration.sql")),
         ("003_agent_features", include_str!("../../migrations/003_agent_features.sql")),
+        ("004_fix_status_constraints", include_str!("../../migrations/004_fix_status_constraints.sql")),
+        ("005_agent_enabled", include_str!("../../migrations/005_agent_enabled.sql")),
+        ("006_cache_tokens", include_str!("../../migrations/006_cache_tokens.sql")),
+        ("007_rating", include_str!("../../migrations/007_rating.sql")),
+        ("008_scheduling", include_str!("../../migrations/008_scheduling.sql")),
     ];
 
     for (name, sql) in migrations {

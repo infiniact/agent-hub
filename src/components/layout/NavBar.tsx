@@ -2,10 +2,11 @@
 
 import { useAgentStore } from "@/stores/agentStore";
 import { useAcpStore } from "@/stores/acpStore";
+import { useOrchestrationStore } from "@/stores/orchestrationStore";
 import { Codicon } from "@/components/ui/Codicon";
 import { McpIcon } from "@/components/icons/McpIcon";
 import { cn } from "@/lib/cn";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { isTauri } from "@/lib/tauri";
 
 const iconMap: Record<string, string> = {
@@ -30,10 +31,54 @@ export function NavBar() {
   const setControlHub = useAgentStore((s) => s.setControlHub);
   const deleteAgent = useAgentStore((s) => s.deleteAgent);
   const controlHubAgentId = useAgentStore((s) => s.controlHubAgentId);
+  const showKanban = useAgentStore((s) => s.showKanban);
+  const setShowKanban = useAgentStore((s) => s.setShowKanban);
   const discoveredAgents = useAcpStore((s) => s.discoveredAgents);
   const scanForAgents = useAcpStore((s) => s.scanForAgents);
+
+  // Get task runs to show status dots for agents with scheduled/running tasks
+  const taskRuns = useOrchestrationStore((s) => s.taskRuns);
+  const fetchTaskRuns = useOrchestrationStore((s) => s.fetchTaskRuns);
+  const clearViewingTaskRun = useOrchestrationStore((s) => s.clearViewingTaskRun);
+
   const [initialized, setInitialized] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
+
+  // Compute agent task status dots: only show currently running tasks
+  const agentTaskDots = useMemo(() => {
+    const dotsMap: Record<string, Array<'running' | 'scheduled'>> = {};
+
+    for (const task of taskRuns) {
+      const agentId = task.control_hub_agent_id;
+      if (!dotsMap[agentId]) {
+        dotsMap[agentId] = [];
+      }
+      if (dotsMap[agentId].length >= 5) continue;
+
+      // Scheduled tasks pending execution
+      if (task.schedule_type !== "none" && task.next_run_at && !task.is_paused) {
+        const nextRun = new Date(task.next_run_at);
+        if (nextRun > new Date()) {
+          dotsMap[agentId].push('scheduled');
+          continue;
+        }
+      }
+
+      // Only running/in-progress tasks
+      if (task.status === "running" || task.status === "analyzing" || task.status === "awaiting_confirmation" || task.status === "pending") {
+        dotsMap[agentId].push('running');
+      }
+    }
+
+    return dotsMap;
+  }, [taskRuns]);
+
+  // Fetch task runs on mount
+  useEffect(() => {
+    if (isTauri()) {
+      fetchTaskRuns();
+    }
+  }, [fetchTaskRuns]);
 
   useEffect(() => {
     if (!isTauri() || initialized) return;
@@ -163,53 +208,98 @@ export function NavBar() {
 
       {/* Center: Agent tabs */}
       <div className="flex items-center gap-3">
-        {agents.map((agent) => (
-          <div
-            key={agent.id}
-            className="relative group cursor-pointer"
-            onClick={() => selectAgent(agent.id)}
-            onContextMenu={(e) => handleContextMenu(e, agent.id)}
-            title={agent.name}
-          >
+        {/* Kanban button with divider */}
+        <button
+          onClick={() => {
+            setShowKanban(true);
+            // Clear selected agent when showing kanban
+            selectAgent(null as any);
+          }}
+          className={cn(
+            "size-8 rounded-lg flex items-center justify-center transition-all",
+            showKanban
+              ? "bg-primary text-background-dark shadow-[0_0_10px_rgba(0,229,255,0.3)]"
+              : "bg-white dark:bg-surface-dark border border-slate-200 dark:border-white/5 hover:border-primary/50 text-slate-400 dark:text-gray-400 hover:text-primary"
+          )}
+          title="Session Kanban"
+        >
+          <Codicon name="kanban" className="text-[20px]" />
+        </button>
+        <div className="w-px h-5 bg-slate-200 dark:border-border-dark/60 mx-1" />
+        {agents.map((agent) => {
+          const dots = agentTaskDots[agent.id] || [];
+
+          return (
             <div
-              className={cn(
-                "size-8 rounded-lg flex items-center justify-center transition-all transform hover:scale-105",
-                selectedAgentId === agent.id
-                  ? "bg-primary text-background-dark shadow-[0_0_10px_rgba(0,229,255,0.3)]"
-                  : "bg-white dark:bg-surface-dark border border-slate-200 dark:border-white/5 hover:border-primary/50 text-slate-400 dark:text-gray-400 hover:text-primary"
-              )}
+              key={agent.id}
+              className="relative group cursor-pointer"
+              onClick={() => {
+                selectAgent(agent.id);
+                setShowKanban(false);
+                clearViewingTaskRun();
+              }}
+              onContextMenu={(e) => handleContextMenu(e, agent.id)}
+              title={agent.name}
             >
-              <Codicon name={iconMap[agent.icon] ?? "code"} className="text-[20px]" />
-            </div>
-            {/* Delete button on hover */}
-            {agents.length > 1 && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const id = agent.id;
-                  deleteAgent(id).then(() => {
-                    const remaining = useAgentStore.getState().agents;
-                    if (useAgentStore.getState().selectedAgentId === null && remaining.length > 0) {
-                      selectAgent(remaining[0].id);
-                    }
-                  }).catch((err) => console.error('[NavBar] delete failed:', err));
-                }}
-                className="absolute -top-1.5 -right-1.5 size-4 rounded-full bg-slate-300 dark:bg-gray-600 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-rose-500 transition-all"
+              <div
+                className={cn(
+                  "size-8 rounded-lg flex items-center justify-center transition-all transform hover:scale-105",
+                  !agent.is_enabled && "opacity-30 grayscale",
+                  !showKanban && selectedAgentId === agent.id
+                    ? "bg-primary text-background-dark shadow-[0_0_10px_rgba(0,229,255,0.3)]"
+                    : "bg-white dark:bg-surface-dark border border-slate-200 dark:border-white/5 hover:border-primary/50 text-slate-400 dark:text-gray-400 hover:text-primary"
+                )}
               >
-                <Codicon name="close" className="text-[10px]" />
-              </button>
-            )}
-            {agent.status === "Running" && !agents.length && (
-              <div className="status-dot absolute -top-0.5 -right-0.5 size-2 rounded-full border border-background-dark bg-primary" />
-            )}
-            {/* Crown icon for Control Hub */}
-            {agent.is_control_hub && (
-              <div className="absolute -top-1.5 -left-1.5">
-                <Codicon name="star-full" className="text-[12px] text-amber-400" />
+                <Codicon name={iconMap[agent.icon] ?? "code"} className="text-[20px]" />
               </div>
-            )}
-          </div>
-        ))}
+              {/* Delete button on hover */}
+              {agents.length > 1 && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const id = agent.id;
+                    deleteAgent(id).then(() => {
+                      const remaining = useAgentStore.getState().agents;
+                      if (useAgentStore.getState().selectedAgentId === null && remaining.length > 0) {
+                        selectAgent(remaining[0].id);
+                      }
+                    }).catch((err) => console.error('[NavBar] delete failed:', err));
+                  }}
+                  className="absolute -top-1.5 -right-1.5 size-4 rounded-full bg-slate-300 dark:bg-gray-600 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-rose-500 transition-all"
+                >
+                  <Codicon name="close" className="text-[10px]" />
+                </button>
+              )}
+              {/* Task status dots */}
+              {dots.length > 0 && (
+                <div className="absolute -top-1 left-1/2 -translate-x-1/2 flex gap-[2px]">
+                  {dots.map((status, i) => (
+                    <div
+                      key={i}
+                      className={cn(
+                        "size-[5px] rounded-full",
+                        status === "running" && "bg-blue-500 animate-pulse",
+                        status === "scheduled" && "bg-amber-400"
+                      )}
+                    />
+                  ))}
+                </div>
+              )}
+              {/* Crown icon for Control Hub */}
+              {agent.is_control_hub && (
+                <div className="absolute -top-1.5 -left-1.5">
+                  <Codicon name="star-full" className="text-[12px] text-amber-400" />
+                </div>
+              )}
+              {/* Disabled indicator */}
+              {!agent.is_enabled && (
+                <div className="absolute -bottom-1 -right-1">
+                  <Codicon name="debug-pause" className="text-[10px] text-rose-400" />
+                </div>
+              )}
+            </div>
+          );
+        })}
         {agents.length === 0 && (
           <div className="relative group cursor-pointer">
             <div className="size-8 rounded-lg bg-primary text-background-dark flex items-center justify-center shadow-[0_0_10px_rgba(0,229,255,0.3)]">

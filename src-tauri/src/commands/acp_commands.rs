@@ -2,6 +2,8 @@ use serde::Serialize;
 use tauri::Emitter;
 
 use crate::acp::{client, discovery, manager, provisioner};
+use crate::acp::builtin;
+use crate::commands::settings_commands;
 use crate::db::agent_repo;
 use crate::error::{AppError, AppResult};
 use crate::models::agent::DiscoveredAgent;
@@ -17,6 +19,9 @@ pub struct AgentStatus {
 pub async fn discover_agents(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<Vec<DiscoveredAgent>> {
+    // Deploy built-in agent (non-blocking on failure)
+    builtin::ensure_builtin_deployed().await;
+
     let agents = discovery::discover_agents().await?;
 
     // Save discovered agents to DB
@@ -93,9 +98,7 @@ pub async fn create_acp_session(
     agent_id: String,
     session_id: String,
 ) -> AppResult<CreateSessionResult> {
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".into());
+    let cwd = settings_commands::resolve_working_directory(state.inner());
 
     let mut processes = state.agent_processes.lock().await;
     let process = processes
@@ -178,9 +181,7 @@ pub async fn get_agent_models(
     state: tauri::State<'_, AppState>,
     agent_id: String,
 ) -> AppResult<GetModelsResult> {
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".into());
+    let cwd = settings_commands::resolve_working_directory(state.inner());
 
     let mut processes = state.agent_processes.lock().await;
     let process = processes
@@ -441,9 +442,7 @@ async fn create_new_acp_session_internal(
     let process = processes.get_mut(agent_id)
         .ok_or_else(|| AppError::Internal(format!("Agent {} process not found", agent_id)))?;
 
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".into());
+    let cwd = settings_commands::resolve_working_directory(state);
 
     let (acp_id, models) = client::create_session(process, &cwd).await?;
     log::info!("Created ACP session: {} with {} models", acp_id, models.len());
@@ -521,7 +520,7 @@ pub async fn ensure_agent_ready(
         AppError::Internal(format!("Agent {} has no ACP command configured", agent_id))
     })?;
 
-    // Check if already running — and if agent type matches
+    // Check if already running — and if agent type or CLI version changed
     let needs_restart = {
         let processes = state.agent_processes.lock().await;
         if let Some(existing) = processes.get(&agent_id) {
@@ -539,6 +538,21 @@ pub async fn ensure_agent_ready(
                     existing.agent_type, expected_type
                 );
                 true
+            } else if !existing.cli_version.is_empty() {
+                // Check if the on-disk CLI was upgraded since this process started
+                if let Some(disk_ver) = builtin::get_cli_version() {
+                    if disk_ver != existing.cli_version {
+                        log::info!(
+                            "CLI version changed on disk: {} -> {}, will restart process",
+                            existing.cli_version, disk_ver
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -636,15 +650,19 @@ pub async fn ensure_agent_ready(
         log::info!("Extra env for agent: {:?}", extra_env);
 
         // --- Spawn ---
-        let process = manager::spawn_agent_process(
+        let mut process = manager::spawn_agent_process(
             &agent_id,
             &resolved.command,
             &resolved.args,
             &extra_env,
             &resolved.agent_type,
         ).await?;
+
+        // Record the on-disk CLI version so we can detect upgrades later
+        process.cli_version = builtin::get_cli_version().unwrap_or_default();
+
         let stdin_handle = process.stdin.clone();
-        log::info!("Agent process spawned: {}", agent_id);
+        log::info!("Agent process spawned: {} (cli_version={})", agent_id, process.cli_version);
 
         {
             let mut processes = state.agent_processes.lock().await;
@@ -758,9 +776,7 @@ pub async fn ensure_agent_ready(
     // --- Fetch models via session/new (stored as temp session) ---
     log::info!("Fetching models for agent {}", agent_id);
 
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".into());
+    let cwd = settings_commands::resolve_working_directory(state.inner());
 
     let mut processes = state.agent_processes.lock().await;
     let process = processes
@@ -866,6 +882,14 @@ pub async fn ensure_agent_ready(
 // Registry install / uninstall commands
 // ---------------------------------------------------------------------------
 
+/// Internal helper: deploy built-in agent then run discovery.
+/// Used by `install_registry_agent` and `uninstall_registry_agent` which don't
+/// go through the tauri `discover_agents` command.
+async fn discover_agents_inner() -> AppResult<Vec<DiscoveredAgent>> {
+    builtin::ensure_builtin_deployed().await;
+    discovery::discover_agents().await
+}
+
 /// Install a registry agent by its registry ID.
 /// For binary-distributed agents: downloads and extracts the binary.
 /// For npx-distributed agents: runs `npx -y <package> --version` to pre-cache.
@@ -875,10 +899,17 @@ pub async fn install_registry_agent(
     registry_id: String,
 ) -> AppResult<Vec<DiscoveredAgent>> {
     use crate::acp::discovery::{
-        Distribution, fetch_registry, get_current_platform, discover_agents,
+        Distribution, fetch_registry, get_current_platform,
     };
 
     log::info!("install_registry_agent: {}", registry_id);
+
+    // Built-in agents use their own deployment path (deps pinned to `latest`)
+    if builtin::is_builtin_agent(&registry_id) {
+        log::info!("install_registry_agent: '{}' is built-in, using builtin deploy", registry_id);
+        builtin::ensure_builtin_deployed().await;
+        return discover_agents_inner().await;
+    }
 
     let registry = fetch_registry().await?;
     let entry = registry
@@ -907,33 +938,68 @@ pub async fn install_registry_agent(
             log::info!("install_registry_agent: binary installed for {}", registry_id);
         }
         Distribution::Npx(npx) => {
-            // Pre-cache the npx package by running `npx -y <package> --version`
+            // Install npx package locally with npm overrides for dependency fixes
+            let adapter_dir = discovery::get_adapters_dir().join(&registry_id);
+            tokio::fs::create_dir_all(&adapter_dir)
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to create adapter dir: {e}")))?;
+
+            // Write package.json with overrides to fix outdated transitive dependencies
+            // Use ^version range to allow compatible minor/patch updates via npm update
+            let raw_version = npx.package.rsplit('@').next().unwrap_or("latest");
+            let version_range = if raw_version == "latest" {
+                "latest".to_string()
+            } else {
+                format!("^{}", raw_version)
+            };
+            let package_json = serde_json::json!({
+                "name": format!("{}-local", registry_id),
+                "private": true,
+                "dependencies": {
+                    npx.package.split('@').take(
+                        if npx.package.starts_with('@') { 2 } else { 1 }
+                    ).collect::<Vec<_>>().join("@"): version_range
+                }
+            });
+            let pkg_path = adapter_dir.join("package.json");
+            tokio::fs::write(&pkg_path, serde_json::to_string_pretty(&package_json).unwrap_or_default())
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to write package.json: {e}")))?;
+
+            // Run npm install in the adapter directory
             let enriched_path = discovery::get_enriched_path();
-            let npx_path = which_in_path("npx", &enriched_path).ok_or_else(|| {
-                AppError::Internal("npx not found on PATH".to_string())
+            let npm_path = which_in_path("npm", &enriched_path).ok_or_else(|| {
+                AppError::Internal("npm not found on PATH".to_string())
             })?;
 
             log::info!(
-                "install_registry_agent: pre-caching npx package {}",
-                npx.package
+                "install_registry_agent: npm install in {:?} for {}",
+                adapter_dir, npx.package
             );
-            let status = tokio::process::Command::new(&npx_path)
-                .args(["-y", &npx.package, "--version"])
+            let output = tokio::process::Command::new(&npm_path)
+                .arg("install")
+                .current_dir(&adapter_dir)
                 .env("PATH", &enriched_path)
                 .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
                 .await
-                .map_err(|e| AppError::Internal(format!("npx spawn error: {e}")))?;
+                .map_err(|e| AppError::Internal(format!("npm install spawn error: {e}")))?;
 
-            if !status.success() {
-                log::warn!(
-                    "npx pre-cache exited with {} (non-fatal, package may still work)",
-                    status
-                );
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::warn!("npm install failed: {}", stderr);
+                return Err(AppError::Internal(format!(
+                    "npm install failed for {}: {}", registry_id, stderr
+                )));
             }
-            log::info!("install_registry_agent: npx package cached for {}", registry_id);
+            log::info!("install_registry_agent: npm package installed for {}", registry_id);
+
+            // Ensure the embedded claude-agent-sdk is up-to-date.
+            // The adapter may pin an older SDK version whose bundled cli.js
+            // is rejected by the remote API. Force-install latest SDK.
+            upgrade_embedded_sdk(&adapter_dir, &enriched_path, &npm_path).await;
         }
     }
 
@@ -941,7 +1007,7 @@ pub async fn install_registry_agent(
     discovery::mark_installed(&registry_id);
 
     // Re-discover so the frontend gets updated availability
-    discover_agents().await
+    discover_agents_inner().await
 }
 
 /// Uninstall a registry agent by its registry ID.
@@ -969,7 +1035,7 @@ pub async fn uninstall_registry_agent(
     discovery::mark_uninstalled(&registry_id);
 
     // Re-discover
-    discovery::discover_agents().await
+    discover_agents_inner().await
 }
 
 /// Thin helper – resolve a command in a given PATH (used only in this module).
@@ -993,5 +1059,48 @@ fn which_in_path(cmd: &str, path_env: &str) -> Option<String> {
         if first.is_empty() { None } else { Some(first) }
     } else {
         None
+    }
+}
+
+/// Upgrade the embedded `@anthropic-ai/claude-agent-sdk` inside a local adapter
+/// to the latest version. The adapter may pin an older SDK whose bundled `cli.js`
+/// (a complete Claude Code bundle) is rejected by the remote API when it mandates
+/// a newer client version. This is non-fatal — if it fails the adapter still works
+/// with whatever SDK version was installed by `npm install`.
+async fn upgrade_embedded_sdk(
+    adapter_dir: &std::path::Path,
+    enriched_path: &str,
+    npm_path: &str,
+) {
+    log::info!("upgrade_embedded_sdk: ensuring latest claude-agent-sdk in {:?}", adapter_dir);
+    let output = tokio::process::Command::new(npm_path)
+        .args(["install", "@anthropic-ai/claude-agent-sdk@latest"])
+        .current_dir(adapter_dir)
+        .env("PATH", enriched_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            // Log the version we ended up with
+            let sdk_pkg = adapter_dir
+                .join("node_modules/@anthropic-ai/claude-agent-sdk/package.json");
+            if let Ok(content) = std::fs::read_to_string(&sdk_pkg) {
+                if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let ver = pkg.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+                    log::info!("upgrade_embedded_sdk: claude-agent-sdk now at {}", ver);
+                }
+            }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!("upgrade_embedded_sdk: npm install failed (non-fatal): {}", stderr.trim());
+        }
+        Err(e) => {
+            log::warn!("upgrade_embedded_sdk: spawn failed (non-fatal): {}", e);
+        }
     }
 }

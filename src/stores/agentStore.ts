@@ -19,6 +19,8 @@ interface AgentState {
   agentError: string | null;
   /** Agent IDs that have been successfully initialized and are ready */
   readyAgentIds: string[];
+  /** Whether the Kanban panel is visible */
+  showKanban: boolean;
 }
 
 interface AgentActions {
@@ -29,10 +31,16 @@ interface AgentActions {
   deleteAgent: (id: string) => Promise<void>;
   setControlHub: (id: string) => Promise<AgentConfig>;
   getControlHub: () => Promise<void>;
+  /** Enable a disabled agent (backend performs health check) */
+  enableAgent: (id: string) => Promise<AgentConfig>;
+  /** Disable an agent (no health check needed) */
+  disableAgent: (id: string) => Promise<AgentConfig>;
   /** Ensure the ACP agent is spawned, initialized, and models are fetched */
   ensureAgentReady: (agentId: string, forceRefresh?: boolean) => Promise<void>;
   /** Force re-fetch models from the agent (ignores cache) */
   refreshModels: (agentId: string) => Promise<void>;
+  /** Toggle or set Kanban panel visibility */
+  setShowKanban: (show: boolean) => void;
 }
 
 export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
@@ -43,6 +51,7 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
   agentInitializing: false,
   agentError: null,
   readyAgentIds: [],
+  showKanban: false,
 
   fetchAgents: async () => {
     set({ loading: true });
@@ -169,6 +178,42 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
     }
   },
 
+  enableAgent: async (id) => {
+    try {
+      const updated = await tauriInvoke<AgentConfig>('enable_agent', { agentId: id });
+      set((state) => ({
+        agents: state.agents.map((a) => (a.id === id ? updated : a)),
+      }));
+      return updated;
+    } catch (error) {
+      // Re-fetch the agent to get the latest state (may have reverted to disabled)
+      try {
+        const agent = await tauriInvoke<AgentConfig>('get_agent', { id });
+        set((state) => ({
+          agents: state.agents.map((a) => (a.id === id ? agent : a)),
+        }));
+      } catch { /* ignore */ }
+      console.error('Failed to enable agent:', error);
+      throw error;
+    }
+  },
+
+  disableAgent: async (id) => {
+    try {
+      const updated = await tauriInvoke<AgentConfig>('update_agent', {
+        id,
+        request: { is_enabled: false },
+      });
+      set((state) => ({
+        agents: state.agents.map((a) => (a.id === id ? updated : a)),
+      }));
+      return updated;
+    } catch (error) {
+      console.error('Failed to disable agent:', error);
+      throw error;
+    }
+  },
+
   ensureAgentReady: async (agentId, forceRefresh) => {
     if (!forceRefresh && get().readyAgentIds.includes(agentId)) {
       console.log('[AgentStore] Agent already ready, skipping:', agentId);
@@ -262,4 +307,29 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
     // Re-run full ensureAgentReady with force refresh to get fresh models via session/new
     await get().ensureAgentReady(agentId, true);
   },
+
+  setShowKanban: (show) => {
+    set({ showKanban: show });
+  },
 }));
+
+// Listen for auto-disable events from orchestration
+if (isTauri()) {
+  tauriListen<{ agentId: string; agentName: string; reason: string }>(
+    'orchestration:agent_auto_disabled',
+    (payload) => {
+      console.log('[AgentStore] Agent auto-disabled:', payload.agentId, payload.reason);
+      const state = useAgentStore.getState();
+      const agent = state.agents.find((a) => a.id === payload.agentId);
+      if (agent) {
+        useAgentStore.setState({
+          agents: state.agents.map((a) =>
+            a.id === payload.agentId
+              ? { ...a, is_enabled: false, disabled_reason: payload.reason }
+              : a
+          ),
+        });
+      }
+    }
+  );
+}

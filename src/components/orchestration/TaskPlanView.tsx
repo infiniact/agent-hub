@@ -3,6 +3,7 @@
 import type { TaskPlan, AgentTrackingInfo } from "@/types/orchestration";
 import { Codicon } from "@/components/ui/Codicon";
 import { useAgentStore } from "@/stores/agentStore";
+import { MarkdownContent } from "@/components/chat/MarkdownContent";
 
 interface TaskPlanViewProps {
   plan: TaskPlan;
@@ -38,7 +39,9 @@ export function TaskPlanView({ plan, agentTracking }: TaskPlanViewProps) {
       </p>
 
       {/* Analysis */}
-      <p className="text-xs text-slate-600 dark:text-gray-400 mb-3">{plan.analysis}</p>
+      <div className="text-xs text-slate-600 dark:text-gray-400 mb-3">
+        <MarkdownContent content={plan.analysis} className="text-xs" />
+      </div>
 
       {/* Steps */}
       <div className="flex flex-col gap-1">
@@ -49,15 +52,15 @@ export function TaskPlanView({ plan, agentTracking }: TaskPlanViewProps) {
                 <Codicon name="arrow-down" className="text-[12px] text-slate-300 dark:text-gray-600" />
               </div>
             )}
-            <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-slate-50 dark:bg-white/[0.03]">
+            <div className="flex items-start gap-2 px-2 py-1.5 rounded bg-slate-50 dark:bg-white/[0.03]">
               {getStatusIcon(assignment.agent_id)}
-              <span className="text-xs font-medium text-slate-700 dark:text-gray-300">
+              <span className="text-xs font-medium text-slate-700 dark:text-gray-300 shrink-0 pt-0.5">
                 {getAgentName(assignment.agent_id)}
               </span>
-              <span className="text-[10px] text-slate-400 dark:text-gray-500 flex-1 truncate">
-                {assignment.task_description}
-              </span>
-              <span className="text-[10px] text-slate-300 dark:text-gray-600 font-mono">
+              <div className="text-[11px] text-slate-400 dark:text-gray-500 flex-1 min-w-0">
+                <MarkdownContent content={assignment.task_description} className="text-[11px]" />
+              </div>
+              <span className="text-[10px] text-slate-300 dark:text-gray-600 font-mono shrink-0 pt-0.5">
                 #{assignment.sequence_order}
               </span>
             </div>

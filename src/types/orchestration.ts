@@ -1,3 +1,12 @@
+export interface RecurrencePattern {
+  frequency: 'daily' | 'weekly' | 'monthly' | 'yearly';
+  time: string;  // HH:MM format
+  interval?: number;  // Interval between occurrences, default 1
+  days_of_week?: number[];  // Days of week for weekly (0 = Sunday, 6 = Saturday)
+  day_of_month?: number;  // Day of month for monthly/yearly (1-31)
+  month?: number;  // Month for yearly (1-12)
+}
+
 export interface TaskRun {
   id: string;
   title: string;
@@ -8,9 +17,18 @@ export interface TaskRun {
   result_summary: string | null;
   total_tokens_in: number;
   total_tokens_out: number;
+  total_cache_creation_tokens: number;
+  total_cache_read_tokens: number;
   total_duration_ms: number;
   created_at: string;
   updated_at: string;
+  rating: number | null; // 1-5 stars rating for completed tasks
+  // Scheduling fields
+  schedule_type: 'none' | 'once' | 'recurring';
+  scheduled_time: string | null;
+  recurrence_pattern_json: string | null;
+  next_run_at: string | null;
+  is_paused: boolean;
 }
 
 export interface TaskAssignment {
@@ -25,6 +43,8 @@ export interface TaskAssignment {
   model_used: string | null;
   tokens_in: number;
   tokens_out: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
   started_at: string | null;
   completed_at: string | null;
   duration_ms: number;
@@ -51,6 +71,8 @@ export interface AgentTrackingInfo {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   tokensIn: number;
   tokensOut: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
   durationMs: number;
   streamedContent: string;
   acpSessionId?: string;
@@ -75,4 +97,12 @@ export interface OrchPermissionRequest {
   sessionId: string;
   toolCall?: { toolCallId: string; title: string; rawInput?: any };
   options: Array<{ optionId: string; name: string; kind: string }>;
+}
+
+// Scheduling request types
+export interface ScheduleTaskRequest {
+  task_run_id: string;
+  schedule_type: 'none' | 'once' | 'recurring';
+  scheduled_time?: string;  // ISO 8601 datetime for one-time execution
+  recurrence_pattern?: RecurrencePattern;
 }

@@ -570,6 +570,34 @@ fn resolve_command_with_path(cmd: &str, path_env: &str) -> Option<String> {
     }
 }
 
+/// Read the `version` field from a locally-installed NPX adapter's `package.json`.
+///
+/// Looks for `~/.iaagenthub/adapters/<agent_id>/node_modules/<pkg>/package.json`.
+fn read_local_adapter_version(agent_id: &str, npx_package: &str) -> Option<String> {
+    // npx_package is e.g. "@google/gemini-cli@0.27.3" or "some-tool@1.0.0"
+    // We need the package name without version: "@google/gemini-cli" or "some-tool"
+    let pkg_name = if npx_package.starts_with('@') {
+        // Scoped: strip version after second '@'
+        if let Some(pos) = npx_package[1..].find('@') {
+            &npx_package[..pos + 1]
+        } else {
+            npx_package
+        }
+    } else {
+        npx_package.split('@').next().unwrap_or(npx_package)
+    };
+
+    let pkg_json_path = get_adapters_dir()
+        .join(agent_id)
+        .join("node_modules")
+        .join(pkg_name)
+        .join("package.json");
+
+    let content = std::fs::read_to_string(&pkg_json_path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+    val.get("version")?.as_str().map(|s| s.to_string())
+}
+
 /// Scan config file paths for user-defined agents (always marked available).
 async fn scan_config_agents() -> Vec<DiscoveredAgent> {
     let mut agents = Vec::new();
@@ -596,6 +624,8 @@ async fn scan_config_agents() -> Vec<DiscoveredAgent> {
                             registry_id: None,
                             icon_url: None,
                             description: String::new(),
+                            adapter_version: None,
+                            cli_version: None,
                         });
                     }
                 }
@@ -621,6 +651,12 @@ pub async fn discover_agents() -> AppResult<Vec<DiscoveredAgent>> {
     let mut agents = Vec::new();
 
     for entry in &registry.agents {
+        // Skip entries that are handled by the built-in agent
+        if super::builtin::is_builtin_agent(&entry.id) {
+            log::info!("Skipping registry entry '{}' (handled by built-in)", entry.id);
+            continue;
+        }
+
         let explicitly_installed = installed_set.contains(&entry.id);
 
         match &entry.distribution {
@@ -628,8 +664,16 @@ pub async fn discover_agents() -> AppResult<Vec<DiscoveredAgent>> {
                 let pkg_name = extract_npx_binary_name(&npx.package);
                 let direct_resolved = resolve_command(pkg_name);
 
-                // Available only if binary is on PATH or explicitly installed (via manifest)
-                let available = direct_resolved.is_some() || explicitly_installed;
+                // Check for locally-installed npm package in adapters dir
+                let local_bin = get_adapters_dir()
+                    .join(&entry.id)
+                    .join("node_modules")
+                    .join(".bin")
+                    .join(pkg_name);
+                let has_local_install = local_bin.exists();
+
+                // Available only if binary is on PATH, locally installed, or explicitly installed (via manifest)
+                let available = direct_resolved.is_some() || has_local_install || explicitly_installed;
                 // Can be installed if npx exists on PATH
                 let can_install = npx_available;
 
@@ -641,6 +685,8 @@ pub async fn discover_agents() -> AppResult<Vec<DiscoveredAgent>> {
 
                 let source_path = if direct_resolved.is_some() {
                     command.clone()
+                } else if has_local_install {
+                    local_bin.to_string_lossy().to_string()
                 } else if explicitly_installed {
                     format!("npx:{}", npx.package)
                 } else if can_install {
@@ -648,6 +694,9 @@ pub async fn discover_agents() -> AppResult<Vec<DiscoveredAgent>> {
                 } else {
                     String::new()
                 };
+
+                // Read adapter version from locally installed package
+                let adapter_version = read_local_adapter_version(&entry.id, &npx.package);
 
                 agents.push(DiscoveredAgent {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -664,6 +713,8 @@ pub async fn discover_agents() -> AppResult<Vec<DiscoveredAgent>> {
                     registry_id: Some(entry.id.clone()),
                     icon_url: entry.icon.clone(),
                     description: entry.description.clone(),
+                    adapter_version,
+                    cli_version: None,
                 });
             }
             Distribution::Binary(platforms) => {
@@ -713,6 +764,8 @@ pub async fn discover_agents() -> AppResult<Vec<DiscoveredAgent>> {
                         registry_id: Some(entry.id.clone()),
                         icon_url: entry.icon.clone(),
                         description: entry.description.clone(),
+                        adapter_version: Some(entry.version.clone()),
+                        cli_version: None,
                     });
                 } else {
                     // No binary for current platform
@@ -729,11 +782,22 @@ pub async fn discover_agents() -> AppResult<Vec<DiscoveredAgent>> {
                         registry_id: Some(entry.id.clone()),
                         icon_url: entry.icon.clone(),
                         description: entry.description.clone(),
+                        adapter_version: Some(entry.version.clone()),
+                        cli_version: None,
                     });
                 }
             }
         }
     }
+
+    // Inject built-in agent (before config agents)
+    let builtin_agent = super::builtin::get_builtin_agent();
+    log::info!(
+        "Built-in agent '{}': available={}",
+        builtin_agent.name,
+        builtin_agent.available
+    );
+    agents.push(builtin_agent);
 
     // User-defined agents from config files (always available)
     let config_agents = scan_config_agents().await;

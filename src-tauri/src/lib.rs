@@ -3,14 +3,19 @@ pub mod commands;
 pub mod db;
 pub mod error;
 pub mod models;
+pub mod scheduler;
 pub mod state;
 
 use state::AppState;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize the database
     let conn = db::migrations::init_db().expect("Failed to initialize database");
+
+    // Create app state before building
+    let app_state = AppState::new(conn);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -33,9 +38,21 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // Start the scheduler using Tauri's async runtime
+            let app_handle = app.handle().clone();
+            let state = app.state::<AppState>().inner().clone();
+            let scheduler_ref = state.scheduler.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let scheduler_state = scheduler::start_scheduler(app_handle, state);
+                let mut scheduler = scheduler_ref.lock().await;
+                *scheduler = Some(scheduler_state);
+            });
+
             Ok(())
         })
-        .manage(AppState::new(conn))
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             // Agent commands
             commands::agent_commands::list_agents,
@@ -45,6 +62,7 @@ pub fn run() {
             commands::agent_commands::delete_agent,
             commands::agent_commands::set_control_hub,
             commands::agent_commands::get_control_hub,
+            commands::agent_commands::enable_agent,
             // Session commands
             commands::session_commands::create_session,
             commands::session_commands::list_sessions,
@@ -78,9 +96,16 @@ pub fn run() {
             commands::orchestration_commands::confirm_orchestration,
             commands::orchestration_commands::regenerate_agent,
             commands::orchestration_commands::respond_orch_permission,
+            commands::orchestration_commands::rate_task_run,
+            commands::orchestration_commands::schedule_task,
+            commands::orchestration_commands::pause_scheduled_task,
+            commands::orchestration_commands::resume_scheduled_task,
+            commands::orchestration_commands::clear_schedule,
             // Settings commands
             commands::settings_commands::get_settings,
             commands::settings_commands::update_settings,
+            commands::settings_commands::select_working_directory,
+            commands::settings_commands::get_working_directory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

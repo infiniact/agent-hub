@@ -1,3 +1,4 @@
+pub mod builtin;
 pub mod client;
 pub mod discovery;
 pub mod filesystem;
@@ -7,3 +8,4 @@ pub mod permissions;
 pub mod provisioner;
 pub mod terminal;
 pub mod transport;
+pub mod upgrade;

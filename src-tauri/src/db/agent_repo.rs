@@ -23,12 +23,14 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<AgentConfig> {
         md_file_path: row.get(14)?,
         max_concurrency: row.get(15)?,
         available_models_json: row.get(16)?,
-        created_at: row.get(17)?,
-        updated_at: row.get(18)?,
+        is_enabled: row.get::<_, i32>(17)? != 0,
+        disabled_reason: row.get(18)?,
+        created_at: row.get(19)?,
+        updated_at: row.get(20)?,
     })
 }
 
-const SELECT_COLS: &str = "id, name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, acp_command, acp_args_json, is_control_hub, md_file_path, max_concurrency, available_models_json, created_at, updated_at";
+const SELECT_COLS: &str = "id, name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, acp_command, acp_args_json, is_control_hub, md_file_path, max_concurrency, available_models_json, is_enabled, disabled_reason, created_at, updated_at";
 
 pub fn list_agents(state: &AppState) -> AppResult<Vec<AgentConfig>> {
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
@@ -106,15 +108,34 @@ pub fn update_agent(state: &AppState, id: &str, req: UpdateAgentRequest) -> AppR
     let is_control_hub = req.is_control_hub.unwrap_or(existing.is_control_hub);
     let max_concurrency = req.max_concurrency.unwrap_or(existing.max_concurrency);
     let available_models_json = req.available_models_json.or(existing.available_models_json);
+    let is_enabled = req.is_enabled.unwrap_or(existing.is_enabled);
+    let disabled_reason = if req.is_enabled == Some(true) {
+        // Clearing disabled_reason when re-enabling
+        req.disabled_reason
+    } else if req.disabled_reason.is_some() {
+        req.disabled_reason
+    } else {
+        existing.disabled_reason
+    };
 
     db.execute(
-        "UPDATE agents SET name=?1, icon=?2, description=?3, status=?4, execution_mode=?5, model=?6, temperature=?7, max_tokens=?8, system_prompt=?9, capabilities_json=?10, acp_command=?11, acp_args_json=?12, is_control_hub=?13, max_concurrency=?14, available_models_json=?15, updated_at=datetime('now') WHERE id=?16",
-        params![name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, acp_command, acp_args_json, is_control_hub as i32, max_concurrency, available_models_json, id],
+        "UPDATE agents SET name=?1, icon=?2, description=?3, status=?4, execution_mode=?5, model=?6, temperature=?7, max_tokens=?8, system_prompt=?9, capabilities_json=?10, acp_command=?11, acp_args_json=?12, is_control_hub=?13, max_concurrency=?14, available_models_json=?15, is_enabled=?16, disabled_reason=?17, updated_at=datetime('now') WHERE id=?18",
+        params![name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, acp_command, acp_args_json, is_control_hub as i32, max_concurrency, available_models_json, is_enabled as i32, disabled_reason, id],
     )
     .map_err(|e| AppError::Database(e.to_string()))?;
 
     drop(db);
     get_agent(state, id)
+}
+
+pub fn disable_agent(state: &AppState, id: &str, reason: &str) -> AppResult<()> {
+    let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
+    db.execute(
+        "UPDATE agents SET is_enabled = 0, disabled_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![reason, id],
+    )
+    .map_err(|e| AppError::Database(e.to_string()))?;
+    Ok(())
 }
 
 pub fn set_control_hub(state: &AppState, id: &str) -> AppResult<AgentConfig> {
@@ -201,6 +222,8 @@ pub fn list_discovered_agents(state: &AppState) -> AppResult<Vec<DiscoveredAgent
                 registry_id: None,
                 icon_url: None,
                 description: String::new(),
+                adapter_version: None,
+                cli_version: None,
             })
         })
         .map_err(|e| AppError::Database(e.to_string()))?

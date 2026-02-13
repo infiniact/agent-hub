@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use tauri::Emitter;
 
-use crate::acp::{client, discovery, manager, provisioner, transport};
-use crate::db::{agent_md, agent_repo, task_run_repo};
+use crate::acp::{client, discovery, manager, provisioner, transport, upgrade};
+use crate::db::{agent_md, agent_repo, settings_repo, task_run_repo};
 use crate::error::{AppError, AppResult};
 use crate::models::agent::AgentConfig;
 use crate::models::task_run::{TaskPlan, PlannedAssignment};
@@ -15,6 +15,8 @@ struct AgentPromptResult {
     text: String,
     tokens_in: i64,
     tokens_out: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
     acp_session_id: String,
 }
 
@@ -98,7 +100,10 @@ async fn run_orchestration_inner(
             .map_err(|e| AppError::Internal(e.to_string()))??
     };
 
-    let catalog = build_agent_catalog(&all_agents);
+    // Filter to only enabled agents for orchestration
+    let enabled_agents: Vec<&AgentConfig> = all_agents.iter().filter(|a| a.is_enabled).collect();
+
+    let catalog = build_agent_catalog_refs(&enabled_agents);
 
     // Try to use agents registry file; fall back to inline catalog
     let registry_content = agent_md::read_agents_registry()
@@ -136,6 +141,29 @@ Rules:
     // Parse the plan
     let plan = parse_task_plan(&plan_response.text)?;
 
+    // Validate: warn if hub assigned any disabled agents
+    for assignment in &plan.assignments {
+        if let Some(agent) = all_agents.iter().find(|a| a.id == assignment.agent_id) {
+            if !agent.is_enabled {
+                log::warn!(
+                    "Hub assigned disabled agent '{}' ({}). Skipping this assignment.",
+                    agent.name, agent.id
+                );
+            }
+        }
+    }
+
+    // Filter out assignments to disabled agents
+    let plan = TaskPlan {
+        analysis: plan.analysis,
+        assignments: plan.assignments.into_iter().filter(|a| {
+            all_agents.iter()
+                .find(|ag| ag.id == a.agent_id)
+                .map(|ag| ag.is_enabled)
+                .unwrap_or(true)
+        }).collect(),
+    };
+
     // Store plan in DB
     {
         let plan_json = serde_json::to_string(&plan)
@@ -169,6 +197,8 @@ Rules:
     let mut agent_outputs: HashMap<String, String> = HashMap::new();
     let mut total_tokens_in: i64 = 0;
     let mut total_tokens_out: i64 = 0;
+    let mut total_cache_creation_tokens: i64 = 0;
+    let mut total_cache_read_tokens: i64 = 0;
 
     // Group assignments by sequence_order
     let mut sequence_groups: HashMap<i64, Vec<&PlannedAssignment>> = HashMap::new();
@@ -271,7 +301,7 @@ Rules:
                     let aid = assignment_id.clone();
                     tokio::task::spawn_blocking(move || {
                         task_run_repo::update_task_assignment(
-                            &state_clone, &aid, "running", None, None, 0, 0, 0, None,
+                            &state_clone, &aid, "running", None, None, 0, 0, 0, 0, 0, None,
                         )
                     })
                     .await
@@ -330,7 +360,7 @@ Rules:
                 join_set.spawn(async move {
                     let assign_start = std::time::Instant::now();
 
-                    let result = execute_agent_assignment(
+                    let result = execute_agent_assignment_with_self_healing(
                         &app_clone,
                         &state_clone,
                         &agent_config,
@@ -351,10 +381,12 @@ Rules:
                                 let model = agent_model_clone.clone();
                                 let ti = prompt_result.tokens_in;
                                 let to = prompt_result.tokens_out;
+                                let cct = prompt_result.cache_creation_tokens;
+                                let crt = prompt_result.cache_read_tokens;
                                 let _ = tokio::task::spawn_blocking(move || {
                                     task_run_repo::update_task_assignment(
                                         &state_clone2, &aid, "completed", Some(&out), Some(&model),
-                                        ti, to, duration_ms, None,
+                                        ti, to, cct, crt, duration_ms, None,
                                     )
                                 }).await;
                             }
@@ -368,6 +400,8 @@ Rules:
                                 "status": "completed",
                                 "tokensIn": prompt_result.tokens_in,
                                 "tokensOut": prompt_result.tokens_out,
+                                "cacheCreationTokens": prompt_result.cache_creation_tokens,
+                                "cacheReadTokens": prompt_result.cache_read_tokens,
                                 "acpSessionId": prompt_result.acp_session_id,
                                 "output": prompt_result.text.clone(),
                             }));
@@ -379,6 +413,27 @@ Rules:
                             let is_cancelled = err_msg.contains("Agent cancelled");
                             let status = if is_cancelled { "cancelled" } else { "failed" };
 
+                            // Auto-disable agent on non-cancellation errors
+                            if !is_cancelled {
+                                let state_for_disable = state_clone.clone();
+                                let agent_id_for_disable = agent_id_clone.clone();
+                                let err_for_disable = err_msg.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    agent_repo::disable_agent(
+                                        &state_for_disable,
+                                        &agent_id_for_disable,
+                                        &err_for_disable,
+                                    )
+                                }).await;
+
+                                let _ = app_clone.emit("orchestration:agent_auto_disabled", &serde_json::json!({
+                                    "taskRunId": task_run_id_clone,
+                                    "agentId": agent_id_clone,
+                                    "agentName": agent_name_clone,
+                                    "reason": &err_msg,
+                                }));
+                            }
+
                             // Update assignment as failed/cancelled
                             {
                                 let state_clone2 = state_clone.clone();
@@ -388,7 +443,7 @@ Rules:
                                 let _ = tokio::task::spawn_blocking(move || {
                                     task_run_repo::update_task_assignment(
                                         &state_clone2, &aid, &s, None, None,
-                                        0, 0, duration_ms, Some(&em),
+                                        0, 0, 0, 0, duration_ms, Some(&em),
                                     )
                                 }).await;
                             }
@@ -417,6 +472,8 @@ Rules:
                     Ok((agent_id, Ok(prompt_result))) => {
                         total_tokens_in += prompt_result.tokens_in;
                         total_tokens_out += prompt_result.tokens_out;
+                        total_cache_creation_tokens += prompt_result.cache_creation_tokens;
+                        total_cache_read_tokens += prompt_result.cache_read_tokens;
                         agent_outputs.insert(agent_id, prompt_result.text);
                     }
                     Ok((agent_id, Err(err_msg))) => {
@@ -548,7 +605,7 @@ Rules:
                 }));
 
                 let assign_start = std::time::Instant::now();
-                let result = execute_agent_assignment(
+                let result = execute_agent_assignment_with_self_healing(
                     app, state, &agent_config, &input_text, task_run_id, None,
                 ).await;
                 let duration_ms = assign_start.elapsed().as_millis() as i64;
@@ -557,6 +614,8 @@ Rules:
                     Ok(prompt_result) => {
                         total_tokens_in += prompt_result.tokens_in;
                         total_tokens_out += prompt_result.tokens_out;
+                        total_cache_creation_tokens += prompt_result.cache_creation_tokens;
+                        total_cache_read_tokens += prompt_result.cache_read_tokens;
 
                         let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
                             "taskRunId": task_run_id,
@@ -567,6 +626,8 @@ Rules:
                             "status": "completed",
                             "tokensIn": prompt_result.tokens_in,
                             "tokensOut": prompt_result.tokens_out,
+                            "cacheCreationTokens": prompt_result.cache_creation_tokens,
+                            "cacheReadTokens": prompt_result.cache_read_tokens,
                             "acpSessionId": prompt_result.acp_session_id,
                             "output": prompt_result.text.clone(),
                         }));
@@ -575,6 +636,28 @@ Rules:
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
+
+                        // Auto-disable agent on regeneration failure
+                        {
+                            let state_for_disable = state.clone();
+                            let agent_id_for_disable = agent_id.clone();
+                            let err_for_disable = err_msg.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                agent_repo::disable_agent(
+                                    &state_for_disable,
+                                    &agent_id_for_disable,
+                                    &err_for_disable,
+                                )
+                            }).await;
+
+                            let _ = app.emit("orchestration:agent_auto_disabled", &serde_json::json!({
+                                "taskRunId": task_run_id,
+                                "agentId": agent_id,
+                                "agentName": agent_name,
+                                "reason": &err_msg,
+                            }));
+                        }
+
                         let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
                             "taskRunId": task_run_id,
                             "assignmentId": regen_assignment_id,
@@ -653,7 +736,7 @@ Rules:
                         }));
 
                         let assign_start = std::time::Instant::now();
-                        let result = execute_agent_assignment(
+                        let result = execute_agent_assignment_with_self_healing(
                             app, state, &agent_config, &input_text, task_run_id, None,
                         ).await;
                         let duration_ms = assign_start.elapsed().as_millis() as i64;
@@ -662,6 +745,8 @@ Rules:
                             Ok(prompt_result) => {
                                 total_tokens_in += prompt_result.tokens_in;
                                 total_tokens_out += prompt_result.tokens_out;
+                                total_cache_creation_tokens += prompt_result.cache_creation_tokens;
+                                total_cache_read_tokens += prompt_result.cache_read_tokens;
 
                                 let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
                                     "taskRunId": task_run_id,
@@ -672,6 +757,8 @@ Rules:
                                     "status": "completed",
                                     "tokensIn": prompt_result.tokens_in,
                                     "tokensOut": prompt_result.tokens_out,
+                                    "cacheCreationTokens": prompt_result.cache_creation_tokens,
+                                    "cacheReadTokens": prompt_result.cache_read_tokens,
                                     "acpSessionId": prompt_result.acp_session_id,
                                     "output": prompt_result.text.clone(),
                                 }));
@@ -680,6 +767,28 @@ Rules:
                             }
                             Err(e) => {
                                 let err_msg = e.to_string();
+
+                                // Auto-disable agent on regenerate-all failure
+                                {
+                                    let state_for_disable = state.clone();
+                                    let agent_id_for_disable = planned.agent_id.clone();
+                                    let err_for_disable = err_msg.clone();
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        agent_repo::disable_agent(
+                                            &state_for_disable,
+                                            &agent_id_for_disable,
+                                            &err_for_disable,
+                                        )
+                                    }).await;
+
+                                    let _ = app.emit("orchestration:agent_auto_disabled", &serde_json::json!({
+                                        "taskRunId": task_run_id,
+                                        "agentId": planned.agent_id,
+                                        "agentName": agent_name,
+                                        "reason": &err_msg,
+                                    }));
+                                }
+
                                 let _ = app.emit("orchestration:agent_completed", &serde_json::json!({
                                     "taskRunId": task_run_id,
                                     "assignmentId": regen_assignment_id,
@@ -760,7 +869,7 @@ Rules:
         let id = task_run_id.to_string();
         tokio::task::spawn_blocking(move || {
             task_run_repo::update_task_run_totals(
-                &state_clone, &id, total_tokens_in, total_tokens_out, total_duration_ms,
+                &state_clone, &id, total_tokens_in, total_tokens_out, total_cache_creation_tokens, total_cache_read_tokens, total_duration_ms,
             )
         })
         .await
@@ -785,12 +894,14 @@ Rules:
         "totalDurationMs": total_duration_ms,
         "totalTokensIn": total_tokens_in,
         "totalTokensOut": total_tokens_out,
+        "totalCacheCreationTokens": total_cache_creation_tokens,
+        "totalCacheReadTokens": total_cache_read_tokens,
     }));
 
     Ok(())
 }
 
-fn build_agent_catalog(agents: &[AgentConfig]) -> String {
+fn build_agent_catalog_refs(agents: &[&AgentConfig]) -> String {
     agents
         .iter()
         .map(|a| {
@@ -958,9 +1069,7 @@ async fn send_prompt_to_agent(
         // Create a new ACP session
         let mut processes = state.agent_processes.lock().await;
         if let Some(process) = processes.get_mut(agent_id) {
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".into());
+            let cwd = resolve_orchestrator_working_directory(state);
 
             let (acp_id, _models) = client::create_session(process, &cwd).await?;
 
@@ -993,6 +1102,9 @@ async fn send_prompt_to_agent(
     let mut collected_text = String::new();
     let mut tokens_in: i64 = 0;
     let mut tokens_out: i64 = 0;
+    let mut cache_creation_tokens: i64 = 0;
+    let mut cache_read_tokens: i64 = 0;
+    let mut jsonrpc_error: Option<String> = None;
 
     loop {
         // Check per-agent cancellation
@@ -1196,15 +1308,36 @@ async fn send_prompt_to_agent(
                         // Extract token usage if present
                         if let Some(result) = msg.get("result") {
                             if let Some(usage) = result.get("usage") {
+                                log::info!("Token usage from agent: {}", serde_json::to_string(&usage).unwrap_or_default());
                                 tokens_in = usage.get("tokensIn")
                                     .or_else(|| usage.get("input_tokens"))
+                                    .or_else(|| usage.get("promptTokens"))
                                     .and_then(|v| v.as_i64())
                                     .unwrap_or(0);
                                 tokens_out = usage.get("tokensOut")
                                     .or_else(|| usage.get("output_tokens"))
+                                    .or_else(|| usage.get("completionTokens"))
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                cache_creation_tokens = usage.get("cacheCreationInputTokens")
+                                    .or_else(|| usage.get("cache_creation_input_tokens"))
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                cache_read_tokens = usage.get("cacheReadInputTokens")
+                                    .or_else(|| usage.get("cache_read_input_tokens"))
                                     .and_then(|v| v.as_i64())
                                     .unwrap_or(0);
                             }
+                        }
+                        // Capture JSON-RPC error if present
+                        if let Some(error) = msg.get("error") {
+                            let err_msg = error.get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown agent error");
+                            let err_code = error.get("code")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            jsonrpc_error = Some(format!("Agent error (code {}): {}", err_code, err_msg));
                         }
                         if msg.get("result").is_some() || msg.get("error").is_some() {
                             break;
@@ -1217,14 +1350,30 @@ async fn send_prompt_to_agent(
         }
     }
 
+    // Return error if the agent returned a JSON-RPC error
+    if let Some(err) = jsonrpc_error {
+        if collected_text.is_empty() {
+            if upgrade::detect_upgrade_error(&err).is_some() {
+                return Err(AppError::VersionUpgradeRequired(err));
+            }
+            return Err(AppError::Internal(err));
+        }
+        // If we got both text and an error, log the error but return the text
+        log::warn!("Agent returned error alongside text: {}", err);
+    }
+
     if collected_text.is_empty() {
-        collected_text = "(No response from agent)".into();
+        return Err(AppError::Internal(
+            "Agent returned no response. Check that the agent is running and configured correctly.".into()
+        ));
     }
 
     Ok(AgentPromptResult {
         text: collected_text,
         tokens_in,
         tokens_out,
+        cache_creation_tokens,
+        cache_read_tokens,
         acp_session_id,
     })
 }
@@ -1239,6 +1388,137 @@ async fn execute_agent_assignment(
 ) -> AppResult<AgentPromptResult> {
     ensure_agent_running(app, state, agent).await?;
     send_prompt_to_agent(app, state, &agent.id, input, Some(task_run_id), cancel_token).await
+}
+
+/// Stop an agent process and clean up all associated state (sessions, stdin handles).
+async fn stop_and_cleanup_agent(state: &AppState, agent_id: &str) {
+    // Stop and remove agent process
+    {
+        let mut processes = state.agent_processes.lock().await;
+        if let Some(mut process) = processes.remove(agent_id) {
+            if let Err(e) = manager::stop_agent_process(&mut process).await {
+                log::warn!("Failed to stop agent {} during cleanup: {}", agent_id, e);
+            }
+        }
+    }
+
+    // Remove stdin handle
+    {
+        let mut stdins = state.agent_stdins.lock().await;
+        stdins.remove(agent_id);
+    }
+
+    // Remove all ACP sessions belonging to this agent
+    {
+        let mut sessions = state.acp_sessions.lock().await;
+        sessions.retain(|_, info| info.agent_id != agent_id);
+    }
+}
+
+/// Maximum number of upgrade retries before giving up.
+const MAX_UPGRADE_RETRIES: usize = 1;
+
+/// Wraps `execute_agent_assignment()` with automatic self-healing on version-upgrade errors.
+///
+/// If the agent returns a `VersionUpgradeRequired` error:
+/// 1. Detects and parses the upgrade command
+/// 2. Runs `npm install -g <package>@<version>`
+/// 3. Optionally updates the local adapter
+/// 4. Kills the old agent process and clears sessions
+/// 5. Retries the assignment (agent will be re-spawned by `ensure_agent_running`)
+async fn execute_agent_assignment_with_self_healing(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    agent: &AgentConfig,
+    input: &str,
+    task_run_id: &str,
+    cancel_token: Option<&CancellationToken>,
+) -> AppResult<AgentPromptResult> {
+    let mut retries = 0;
+
+    loop {
+        let result = execute_agent_assignment(app, state, agent, input, task_run_id, cancel_token).await;
+
+        match result {
+            Ok(prompt_result) => return Ok(prompt_result),
+            Err(AppError::VersionUpgradeRequired(ref err_msg)) => {
+                if retries >= MAX_UPGRADE_RETRIES {
+                    log::error!(
+                        "Agent {} still requires upgrade after {} retries, giving up",
+                        agent.id,
+                        retries
+                    );
+                    return Err(AppError::Internal(format!(
+                        "Agent upgrade failed after {} retries: {}",
+                        retries, err_msg
+                    )));
+                }
+                retries += 1;
+
+                let upgrade_info = match upgrade::detect_upgrade_error(err_msg) {
+                    Some(info) => info,
+                    None => {
+                        // Should not happen since we already detected it, but be safe
+                        return Err(AppError::Internal(err_msg.clone()));
+                    }
+                };
+
+                log::info!(
+                    "Agent {} requires upgrade: {} — attempting automatic upgrade (retry {}/{})",
+                    agent.id,
+                    upgrade_info.package,
+                    retries,
+                    MAX_UPGRADE_RETRIES
+                );
+
+                // Emit upgrading event
+                let _ = app.emit("orchestration:agent_upgrading", &serde_json::json!({
+                    "taskRunId": task_run_id,
+                    "agentId": agent.id,
+                    "agentName": agent.name,
+                    "package": upgrade_info.package,
+                }));
+
+                // Run npm upgrade
+                if let Err(e) = upgrade::run_npm_upgrade(&upgrade_info).await {
+                    log::error!("npm upgrade failed for {}: {}", upgrade_info.package, e);
+                    let _ = app.emit("orchestration:agent_upgrade_failed", &serde_json::json!({
+                        "taskRunId": task_run_id,
+                        "agentId": agent.id,
+                        "agentName": agent.name,
+                        "error": e.to_string(),
+                    }));
+                    return Err(e);
+                }
+
+                // Update local adapter (non-fatal)
+                if let Err(e) = upgrade::update_local_adapter(&upgrade_info.agent_type).await {
+                    log::warn!("Local adapter update failed (non-fatal): {}", e);
+                }
+
+                // Refresh registry to pick up new versions (non-fatal)
+                if let Err(e) = discovery::refresh_registry().await {
+                    log::warn!("Registry refresh failed (non-fatal): {}", e);
+                }
+
+                // Kill old process and clear sessions
+                stop_and_cleanup_agent(state, &agent.id).await;
+
+                // Emit upgraded event
+                let _ = app.emit("orchestration:agent_upgraded", &serde_json::json!({
+                    "taskRunId": task_run_id,
+                    "agentId": agent.id,
+                    "agentName": agent.name,
+                    "package": upgrade_info.package,
+                }));
+
+                // Loop back — execute_agent_assignment will call ensure_agent_running
+                // which re-spawns the agent with the upgraded binary
+                continue;
+            }
+            Err(other) => return Err(other),
+        }
+    }
 }
 
 async fn is_cancelled(state: &AppState, task_run_id: &str) -> bool {
@@ -1324,4 +1604,17 @@ fn format_duration(ms: i64) -> String {
         let secs = (ms % 60_000) / 1000;
         format!("{}m {}s", mins, secs)
     }
+}
+
+/// Resolve the effective working directory for orchestration.
+/// Returns the user-configured trusted directory, or falls back to current_dir().
+fn resolve_orchestrator_working_directory(state: &AppState) -> String {
+    if let Ok(Some(setting)) = settings_repo::get_setting(state, "working_directory") {
+        if !setting.value.is_empty() {
+            return setting.value;
+        }
+    }
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".into())
 }

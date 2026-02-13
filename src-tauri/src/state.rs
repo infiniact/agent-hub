@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use serde::{Deserialize, Serialize};
 
 use crate::acp::manager::AgentProcess;
+use crate::scheduler::SchedulerState;
 
 /// Action the user can take when orchestration awaits confirmation
 #[derive(Debug)]
@@ -127,6 +128,8 @@ pub struct AppState {
     pub pending_confirmations: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConfirmationAction>>>>,
     /// Pending orchestration permission channels: (task_run_id, request_id) -> oneshot sender(option_id)
     pub pending_orch_permissions: Arc<Mutex<HashMap<OrchPermissionKey, tokio::sync::oneshot::Sender<String>>>>,
+    /// Scheduler state for background task execution
+    pub scheduler: Arc<Mutex<Option<SchedulerState>>>,
 }
 
 impl AppState {
@@ -141,6 +144,7 @@ impl AppState {
             agent_cancellations: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             pending_orch_permissions: Arc::new(Mutex::new(HashMap::new())),
+            scheduler: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -158,6 +162,7 @@ impl Clone for AppState {
             agent_cancellations: Arc::clone(&self.agent_cancellations),
             pending_confirmations: Arc::clone(&self.pending_confirmations),
             pending_orch_permissions: Arc::clone(&self.pending_orch_permissions),
+            scheduler: Arc::clone(&self.scheduler),
         }
     }
 }

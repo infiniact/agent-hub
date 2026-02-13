@@ -5,6 +5,7 @@ import { Codicon } from "@/components/ui/Codicon";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { useState, useRef, useEffect } from "react";
+import { cn } from "@/lib/cn";
 
 const iconOptions = [
   { name: "code", icon: "code" },
@@ -28,6 +29,8 @@ export function AgentIdentity() {
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const setControlHub = useAgentStore((s) => s.setControlHub);
+  const enableAgent = useAgentStore((s) => s.enableAgent);
+  const disableAgent = useAgentStore((s) => s.disableAgent);
   const controlHubAgentId = useAgentStore((s) => s.controlHubAgentId);
   const [iconDropdownOpen, setIconDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -37,6 +40,8 @@ export function AgentIdentity() {
   const [editingDesc, setEditingDesc] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [draftDesc, setDraftDesc] = useState("");
+  const [enableLoading, setEnableLoading] = useState(false);
+  const [enableError, setEnableError] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const descInputRef = useRef<HTMLInputElement>(null);
 
@@ -81,6 +86,24 @@ export function AgentIdentity() {
       useAgentStore.setState({ controlHubAgentId: null });
     } else {
       await setControlHub(agent.id);
+    }
+  };
+
+  const handleToggleEnabled = async () => {
+    if (!agent) return;
+    setEnableError(null);
+    if (agent.is_enabled) {
+      await disableAgent(agent.id);
+    } else {
+      setEnableLoading(true);
+      try {
+        await enableAgent(agent.id);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setEnableError(msg);
+      } finally {
+        setEnableLoading(false);
+      }
     }
   };
 
@@ -213,9 +236,32 @@ export function AgentIdentity() {
               {description}
             </p>
           )}
+          {/* Disabled reason banner */}
+          {agent && !agent.is_enabled && (agent.disabled_reason || enableError) && (
+            <div className="mt-2 px-3 py-1.5 bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/20 rounded text-xs text-rose-600 dark:text-rose-400">
+              <Codicon name="warning" className="mr-1" />
+              Disabled: {enableError || agent.disabled_reason}
+            </div>
+          )}
         </div>
       </div>
-      <div className="flex gap-3">
+      <div className="flex gap-3 items-center">
+        {/* Enable/Disable toggle */}
+        <button
+          onClick={handleToggleEnabled}
+          disabled={enableLoading}
+          className={cn(
+            "relative inline-flex h-6 w-11 items-center rounded-full transition-colors shrink-0",
+            enableLoading && "opacity-50 cursor-wait",
+            agent?.is_enabled ? "bg-primary" : "bg-slate-300 dark:bg-gray-600"
+          )}
+          title={agent?.is_enabled ? "Disable agent" : "Enable agent (runs health check)"}
+        >
+          <span className={cn(
+            "inline-block h-4 w-4 rounded-full bg-white transition-transform",
+            agent?.is_enabled ? "translate-x-6" : "translate-x-1"
+          )} />
+        </button>
         <Button
           variant={isHub ? "primary" : "secondary"}
           onClick={handleToggleHub}

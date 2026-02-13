@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::acp::discovery::{self, BinaryTarget, Distribution};
+use crate::acp::builtin;
 use crate::error::AppResult;
 
 /// The resolved command after provisioning.
@@ -33,6 +34,39 @@ pub async fn resolve_agent_command(
 
     let entry = discovery::get_registry_entry_by_command(basename).await;
     let agent_type = entry.as_ref().map(|e| e.id.as_str()).unwrap_or(basename);
+
+    // Priority 0: Built-in agent — always prefer the embedded adapter.
+    // The built-in adapter embeds JS files directly (not npm-installed), so the
+    // generic staleness check cannot read its version and would incorrectly skip
+    // it, falling through to npx which downloads an older published package.
+    if let Some(ref entry) = entry {
+        if builtin::is_builtin_agent(&entry.id) {
+            let local_bin = discovery::get_adapters_dir()
+                .join(&entry.id)
+                .join("node_modules")
+                .join(".bin")
+                .join(basename);
+            if local_bin.exists() {
+                log::info!(
+                    "Provisioner: using built-in adapter for {} at {:?}",
+                    entry.id,
+                    local_bin,
+                );
+                let dist_args = get_distribution_args(entry);
+                let mut final_args = if dist_args.is_empty() {
+                    args.to_vec()
+                } else {
+                    dist_args
+                };
+                final_args.extend(args.iter().cloned());
+                return Ok(ResolvedCommand {
+                    command: local_bin.to_string_lossy().to_string(),
+                    args: final_args,
+                    agent_type: entry.id.clone(),
+                });
+            }
+        }
+    }
 
     // 1. Check PATH
     let enriched_path = discovery::get_enriched_path();
@@ -96,6 +130,51 @@ pub async fn resolve_agent_command(
                 }
             }
             Distribution::Npx(npx) => {
+                // 3b. Check for locally-installed npm adapter in adapters dir
+                let local_bin = discovery::get_adapters_dir()
+                    .join(&entry.id)
+                    .join("node_modules")
+                    .join(".bin")
+                    .join(basename);
+                if local_bin.exists() {
+                    // Check if the local adapter version matches the registry version
+                    let registry_version = extract_package_version(&npx.package);
+                    let local_version = read_local_adapter_version(&entry.id, &npx.package);
+                    let is_stale = match (&registry_version, &local_version) {
+                        (Some(reg_ver), Some(loc_ver)) if reg_ver != loc_ver => {
+                            log::warn!(
+                                "Provisioner: local adapter {} is stale (local={}, registry={}), skipping cache",
+                                entry.id, loc_ver, reg_ver
+                            );
+                            true
+                        }
+                        (Some(_), None) => {
+                            log::warn!(
+                                "Provisioner: cannot determine local adapter version for {}, skipping cache",
+                                entry.id,
+                            );
+                            true
+                        }
+                        _ => false,
+                    };
+
+                    if !is_stale {
+                        log::info!(
+                            "Provisioner: using locally-installed npm adapter for {} at {:?} (version: {})",
+                            entry.id,
+                            local_bin,
+                            local_version.as_deref().unwrap_or("unknown"),
+                        );
+                        let mut final_args = npx.args.clone();
+                        final_args.extend(args.iter().cloned());
+                        return Ok(ResolvedCommand {
+                            command: local_bin.to_string_lossy().to_string(),
+                            args: final_args,
+                            agent_type: entry.id.clone(),
+                        });
+                    }
+                }
+
                 // 4. NPX fallback
                 if let Some(npx_path) = resolve_in_path("npx", &enriched_path) {
                     log::info!(
@@ -176,6 +255,42 @@ fn resolve_in_path(cmd: &str, path_env: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Extract version from a package specifier like `@scope/name@1.2.3` → `Some("1.2.3")`.
+fn extract_package_version(package: &str) -> Option<String> {
+    if package.starts_with('@') {
+        // Scoped: @scope/name@version — find the second '@'
+        package[1..].find('@').map(|pos| package[pos + 2..].to_string())
+    } else {
+        // Unscoped: name@version
+        package.split('@').nth(1).map(|v| v.to_string())
+    }
+}
+
+/// Read the installed version of an npm package from the local adapter's
+/// `node_modules/<package>/package.json`.
+fn read_local_adapter_version(agent_id: &str, package_specifier: &str) -> Option<String> {
+    // Extract the package name (without version) from the specifier
+    let pkg_name = if package_specifier.starts_with('@') {
+        // Scoped: @scope/name@version → @scope/name
+        match package_specifier[1..].find('@') {
+            Some(pos) => &package_specifier[..pos + 1],
+            None => package_specifier,
+        }
+    } else {
+        package_specifier.split('@').next().unwrap_or(package_specifier)
+    };
+
+    let pkg_json_path = discovery::get_adapters_dir()
+        .join(agent_id)
+        .join("node_modules")
+        .join(pkg_name)
+        .join("package.json");
+
+    let content = std::fs::read_to_string(&pkg_json_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    parsed.get("version").and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
 // ---------------------------------------------------------------------------

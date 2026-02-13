@@ -11,7 +11,7 @@ export function Header() {
   const [registryOpen, setRegistryOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const registryBtnRef = useRef<HTMLButtonElement>(null);
-  const { theme, toggleTheme } = useSettingsStore();
+  const { theme, toggleTheme, workingDirectory, selectWorkingDirectory } = useSettingsStore();
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -22,6 +22,8 @@ export function Header() {
     document.addEventListener("click", handler);
     return () => document.removeEventListener("click", handler);
   }, []);
+
+  const folderName = workingDirectory ? workingDirectory.split('/').pop() : null;
 
   return (
     <header className="h-16 flex-none border-b border-slate-200 dark:border-border-dark bg-white dark:bg-[#0A0A10] px-6 flex items-center justify-between z-50">
@@ -34,6 +36,25 @@ export function Header() {
         </h1>
       </div>
       <div className="flex items-center gap-2">
+        {/* Workspace directory picker */}
+        <div className="flex items-center gap-1">
+          <IconButton
+            title={workingDirectory ? `Workspace: ${workingDirectory}` : "Select workspace folder"}
+            onClick={selectWorkingDirectory}
+          >
+            <div className="relative">
+              <Codicon name="folder-opened" className="text-[20px]" />
+              {!workingDirectory && (
+                <div className="absolute -top-0.5 -right-0.5 size-2.5 rounded-full bg-amber-500 shadow-[0_0_6px_rgba(245,158,11,0.4)]" />
+              )}
+            </div>
+          </IconButton>
+          {folderName && (
+            <span className="text-xs text-slate-400 dark:text-gray-500 max-w-[150px] truncate hidden lg:inline">
+              {folderName}
+            </span>
+          )}
+        </div>
         {/* ACP Registry */}
         <div className="relative">
           <IconButton

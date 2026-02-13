@@ -11,6 +11,7 @@ import { isTauri } from "@/lib/tauri";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const loadSettings = useSettingsStore((s) => s.loadSettings);
+  const loadWorkingDirectory = useSettingsStore((s) => s.loadWorkingDirectory);
   const scanForAgents = useAcpStore((s) => s.scanForAgents);
   const fetchAgents = useAgentStore((s) => s.fetchAgents);
 
@@ -20,6 +21,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
     // Load settings and scan for agents
     loadSettings();
+    loadWorkingDirectory();
     scanForAgents();
 
     // Fetch agents then merge DB-cached models into discoveredAgents
@@ -45,7 +47,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     initializeOrchestrationListeners();
 
     console.log('[Providers] App initialized');
-  }, [loadSettings, scanForAgents, fetchAgents]);
+  }, [loadSettings, loadWorkingDirectory, scanForAgents, fetchAgents]);
 
   return <>{children}</>;
 }

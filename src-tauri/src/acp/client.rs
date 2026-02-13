@@ -4,42 +4,112 @@ use crate::acp::manager::AgentProcess;
 use crate::acp::transport;
 use crate::error::{AppError, AppResult};
 
+/// Maximum number of retries for agent initialization.
+const INIT_MAX_RETRIES: usize = 2;
+/// Timeout for the initialize handshake (seconds). Agents like npx-based ones
+/// can take a long time to start, so this is intentionally generous.
+const INIT_TIMEOUT_SECS: u64 = 120;
+
 /// Send the ACP `initialize` handshake to the agent.
+/// Retries up to INIT_MAX_RETRIES times on transport timeouts, with progressively
+/// longer timeouts. Includes stderr output in error messages for diagnostics.
 pub async fn initialize_agent(process: &mut AgentProcess) -> AppResult<serde_json::Value> {
-    let req = transport::build_request(
-        1,
-        "initialize",
-        Some(json!({
-            "protocolVersion": 1,
-            "clientInfo": {
-                "name": "IAAgentHub",
-                "version": "0.1.0"
-            },
-            "clientCapabilities": {
-                "fs": {
-                    "readTextFile": false,
-                    "writeTextFile": false
+    let mut last_error: Option<AppError> = None;
+
+    for attempt in 0..=INIT_MAX_RETRIES {
+        if attempt > 0 {
+            log::info!(
+                "Retrying agent initialization (attempt {}/{})",
+                attempt + 1,
+                INIT_MAX_RETRIES + 1,
+            );
+            // Brief pause before retry to let the agent catch up
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        let req = transport::build_request(
+            1,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "clientInfo": {
+                    "name": "IAAgentHub",
+                    "version": "0.1.0"
                 },
-                "terminal": false
+                "clientCapabilities": {
+                    "fs": {
+                        "readTextFile": false,
+                        "writeTextFile": false
+                    },
+                    "terminal": false
+                }
+            })),
+        );
+
+        if let Err(e) = transport::send_message(process, &req).await {
+            last_error = Some(e);
+            continue;
+        }
+
+        // Use a generous timeout for initialization
+        match transport::receive_response_with_timeout(process, &json!(1), INIT_TIMEOUT_SECS).await
+        {
+            Ok(response) => {
+                // Check for error in response
+                if let Some(error) = response.get("error") {
+                    let msg = error
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown error");
+                    return Err(AppError::Acp(format!("Initialize failed: {}", msg)));
+                }
+
+                if attempt > 0 {
+                    log::info!(
+                        "Agent initialization succeeded on attempt {}",
+                        attempt + 1
+                    );
+                }
+                return Ok(response);
             }
-        })),
-    );
-
-    transport::send_message(process, &req).await?;
-
-    // Wait for the initialize response, matching by request id
-    let response = transport::receive_response(process, &json!(1)).await?;
-
-    // Check for error in response
-    if let Some(error) = response.get("error") {
-        let msg = error
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown error");
-        return Err(AppError::Acp(format!("Initialize failed: {}", msg)));
+            Err(e) => {
+                let is_timeout = matches!(&e, AppError::Transport(msg) if msg.contains("Timeout"));
+                if is_timeout && attempt < INIT_MAX_RETRIES {
+                    log::warn!(
+                        "Agent initialization timed out (attempt {}/{}): {}",
+                        attempt + 1,
+                        INIT_MAX_RETRIES + 1,
+                        e,
+                    );
+                    last_error = Some(e);
+                    continue;
+                }
+                last_error = Some(e);
+                break;
+            }
+        }
     }
 
-    Ok(response)
+    // All retries exhausted — build a detailed error message with stderr output
+    let base_err = last_error
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "Unknown error".into());
+
+    let stderr_output = {
+        let lines = process.stderr_lines.lock().await;
+        if lines.is_empty() {
+            "(no stderr output captured)".to_string()
+        } else {
+            lines.join("\n")
+        }
+    };
+
+    Err(AppError::Acp(format!(
+        "Agent initialization failed after {} attempts.\nLast error: {}\nAgent stderr:\n{}",
+        INIT_MAX_RETRIES + 1,
+        base_err,
+        stderr_output,
+    )))
 }
 
 /// Get available models from an agent without creating a session.
@@ -190,7 +260,7 @@ pub async fn create_session(
     log::info!("create_session: Sending request: {}", serde_json::to_string(&req).unwrap_or_default());
     transport::send_message(process, &req).await?;
     log::info!("create_session: Request sent, waiting for response...");
-    let response = transport::receive_response(process, &json!(2)).await?;
+    let response = transport::receive_response_with_timeout(process, &json!(2), 90).await?;
     log::info!("create_session: Response received");
 
     // Check for error in response

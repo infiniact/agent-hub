@@ -7,6 +7,8 @@ import type {
   AgentTrackingInfo,
   OrchPermissionRequest,
   OrchToolCall,
+  ScheduleTaskRequest,
+  RecurrencePattern,
 } from '@/types/orchestration';
 
 interface OrchestrationState {
@@ -21,6 +23,14 @@ interface OrchestrationState {
   pendingOrchPermission: OrchPermissionRequest | null;
   isAwaitingConfirmation: boolean;
   expandedAgentId: string | null;
+  /** Task run being viewed from Kanban (read-only historical view) */
+  viewingTaskRun: TaskRun | null;
+  /** Assignments for the viewed task run */
+  viewingAssignments: TaskAssignment[];
+  /** Agent tracking info for the viewed task run */
+  viewingAgentTracking: Record<string, AgentTrackingInfo>;
+  /** Task plan for the viewed task run */
+  viewingTaskPlan: TaskPlan | null;
 }
 
 interface OrchestrationActions {
@@ -40,7 +50,17 @@ interface OrchestrationActions {
     requestId: string,
     optionId: string
   ) => Promise<void>;
+  rateTaskRun: (taskRunId: string, rating: number) => Promise<void>;
   setExpandedAgentId: (agentId: string | null) => void;
+  /** Load a historical task run for viewing from Kanban */
+  viewTaskRun: (taskRun: TaskRun) => Promise<void>;
+  /** Clear the viewed task run */
+  clearViewingTaskRun: () => void;
+  // Scheduling actions
+  scheduleTask: (request: ScheduleTaskRequest) => Promise<TaskRun>;
+  pauseScheduledTask: (taskRunId: string) => Promise<void>;
+  resumeScheduledTask: (taskRunId: string) => Promise<void>;
+  clearSchedule: (taskRunId: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -57,6 +77,10 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
     pendingOrchPermission: null,
     isAwaitingConfirmation: false,
     expandedAgentId: null,
+    viewingTaskRun: null,
+    viewingAssignments: [],
+    viewingAgentTracking: {},
+    viewingTaskPlan: null,
 
     startOrchestration: async (prompt: string) => {
       set({
@@ -246,6 +270,142 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
       set({ expandedAgentId: agentId });
     },
 
+    rateTaskRun: async (taskRunId: string, rating: number) => {
+      try {
+        await tauriInvoke('rate_task_run', { taskRunId, rating });
+        set((state) => ({
+          activeTaskRun: state.activeTaskRun
+            ? { ...state.activeTaskRun, rating }
+            : null,
+          // Also update viewingTaskRun if it's the same task
+          viewingTaskRun: state.viewingTaskRun?.id === taskRunId
+            ? { ...state.viewingTaskRun, rating }
+            : state.viewingTaskRun,
+        }));
+        // Also update taskRuns list
+        useOrchestrationStore.setState((state) => ({
+          taskRuns: state.taskRuns.map((tr) =>
+            tr.id === taskRunId ? { ...tr, rating } : tr
+          ),
+        }));
+      } catch (error) {
+        console.error('[Orchestration] Failed to rate task run:', error);
+        throw error;
+      }
+    },
+
+    viewTaskRun: async (taskRun: TaskRun) => {
+      console.log('[Orchestration] Viewing task run:', taskRun.id);
+      try {
+        // Fetch assignments for this task run
+        const assignments = await tauriInvoke<TaskAssignment[]>('get_task_assignments', {
+          taskRunId: taskRun.id,
+        });
+
+        // Parse task plan
+        let taskPlan: TaskPlan | null = null;
+        if (taskRun.task_plan_json) {
+          try {
+            taskPlan = JSON.parse(taskRun.task_plan_json);
+          } catch {
+            console.warn('[Orchestration] Failed to parse task plan JSON');
+          }
+        }
+
+        // Build agent tracking info from assignments
+        const agentTracking: Record<string, AgentTrackingInfo> = {};
+        for (const assignment of assignments) {
+          agentTracking[assignment.agent_id] = {
+            agentId: assignment.agent_id,
+            agentName: assignment.agent_name,
+            model: assignment.model_used || '',
+            status: assignment.status as AgentTrackingInfo['status'],
+            tokensIn: assignment.tokens_in,
+            tokensOut: assignment.tokens_out,
+            cacheCreationTokens: assignment.cache_creation_tokens,
+            cacheReadTokens: assignment.cache_read_tokens,
+            durationMs: assignment.duration_ms,
+            streamedContent: '',
+            output: assignment.output_text || undefined,
+            assignmentId: assignment.id,
+            toolCalls: [],
+          };
+        }
+
+        set({
+          viewingTaskRun: taskRun,
+          viewingAssignments: assignments,
+          viewingAgentTracking: agentTracking,
+          viewingTaskPlan: taskPlan,
+        });
+      } catch (error) {
+        console.error('[Orchestration] Failed to view task run:', error);
+      }
+    },
+
+    clearViewingTaskRun: () => {
+      set({
+        viewingTaskRun: null,
+        viewingAssignments: [],
+        viewingAgentTracking: {},
+        viewingTaskPlan: null,
+      });
+    },
+
+    // Scheduling actions
+    scheduleTask: async (request: ScheduleTaskRequest) => {
+      const taskRun = await tauriInvoke<TaskRun>('schedule_task', { request });
+      // Update task in the taskRuns list
+      set((state) => ({
+        taskRuns: state.taskRuns.map((tr) =>
+          tr.id === taskRun.id ? taskRun : tr
+        ),
+        // Also update viewingTaskRun if it's the same task
+        viewingTaskRun: state.viewingTaskRun?.id === taskRun.id
+          ? taskRun
+          : state.viewingTaskRun,
+      }));
+      return taskRun;
+    },
+
+    pauseScheduledTask: async (taskRunId: string) => {
+      await tauriInvoke('pause_scheduled_task', { taskRunId });
+      set((state) => ({
+        taskRuns: state.taskRuns.map((tr) =>
+          tr.id === taskRunId ? { ...tr, is_paused: true } : tr
+        ),
+        viewingTaskRun: state.viewingTaskRun?.id === taskRunId
+          ? { ...state.viewingTaskRun, is_paused: true }
+          : state.viewingTaskRun,
+      }));
+    },
+
+    resumeScheduledTask: async (taskRunId: string) => {
+      await tauriInvoke('resume_scheduled_task', { taskRunId });
+      set((state) => ({
+        taskRuns: state.taskRuns.map((tr) =>
+          tr.id === taskRunId ? { ...tr, is_paused: false } : tr
+        ),
+        viewingTaskRun: state.viewingTaskRun?.id === taskRunId
+          ? { ...state.viewingTaskRun, is_paused: false }
+          : state.viewingTaskRun,
+      }));
+    },
+
+    clearSchedule: async (taskRunId: string) => {
+      await tauriInvoke('clear_schedule', { taskRunId });
+      set((state) => ({
+        taskRuns: state.taskRuns.map((tr) =>
+          tr.id === taskRunId
+            ? { ...tr, schedule_type: 'none', scheduled_time: null, recurrence_pattern_json: null, next_run_at: null, is_paused: false }
+            : tr
+        ),
+        viewingTaskRun: state.viewingTaskRun?.id === taskRunId
+          ? { ...state.viewingTaskRun, schedule_type: 'none', scheduled_time: null, recurrence_pattern_json: null, next_run_at: null, is_paused: false }
+          : state.viewingTaskRun,
+      }));
+    },
+
     reset: () => {
       set({
         activeTaskRun: null,
@@ -304,6 +464,8 @@ export function initializeOrchestrationListeners() {
             status: 'running',
             tokensIn: 0,
             tokensOut: 0,
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0,
             durationMs: 0,
             streamedContent: '',
             acpSessionId: payload.acpSessionId || undefined,
@@ -410,9 +572,11 @@ export function initializeOrchestrationListeners() {
                 [payload.agentId]: {
                   ...existing,
                   status: payload.status || 'completed',
-                  durationMs: payload.durationMs || 0,
-                  tokensIn: payload.tokensIn || existing.tokensIn || 0,
-                  tokensOut: payload.tokensOut || existing.tokensOut || 0,
+                  durationMs: payload.durationMs ?? 0,
+                  tokensIn: payload.tokensIn ?? existing.tokensIn ?? 0,
+                  tokensOut: payload.tokensOut ?? existing.tokensOut ?? 0,
+                  cacheCreationTokens: payload.cacheCreationTokens ?? existing.cacheCreationTokens ?? 0,
+                  cacheReadTokens: payload.cacheReadTokens ?? existing.cacheReadTokens ?? 0,
                   acpSessionId: payload.acpSessionId || existing.acpSessionId,
                   output: payload.output || existing.streamedContent || undefined,
                   assignmentId: payload.assignmentId || existing.assignmentId,
@@ -468,9 +632,11 @@ export function initializeOrchestrationListeners() {
             ...state.activeTaskRun,
             status: 'completed',
             result_summary: payload?.summary || null,
-            total_tokens_in: payload?.totalTokensIn || 0,
-            total_tokens_out: payload?.totalTokensOut || 0,
-            total_duration_ms: payload?.totalDurationMs || 0,
+            total_tokens_in: payload?.totalTokensIn ?? 0,
+            total_tokens_out: payload?.totalTokensOut ?? 0,
+            total_cache_creation_tokens: payload?.totalCacheCreationTokens ?? 0,
+            total_cache_read_tokens: payload?.totalCacheReadTokens ?? 0,
+            total_duration_ms: payload?.totalDurationMs ?? 0,
           }
         : state.activeTaskRun,
     }));

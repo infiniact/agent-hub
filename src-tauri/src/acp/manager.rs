@@ -17,6 +17,9 @@ pub struct AgentProcess {
     /// The registry command name (e.g. "gemini", "codex-acp") for identity tracking.
     /// Fixes restart detection when npx agents all share the same basename "npx".
     pub agent_type: String,
+    /// The CLI version (from cli.js header) at the time this process was spawned.
+    /// Used to detect on-disk SDK upgrades that require a process restart.
+    pub cli_version: String,
     pub child: Child,
     pub stdin: Arc<AsyncMutex<BufWriter<ChildStdin>>>,
     pub reader_handle: tokio::task::JoinHandle<()>,
@@ -151,6 +154,7 @@ pub async fn spawn_agent_process(
         agent_id: agent_id.to_string(),
         spawn_command: command.to_string(),
         agent_type: agent_type.to_string(),
+        cli_version: String::new(),
         child,
         stdin: Arc::new(AsyncMutex::new(BufWriter::new(stdin))),
         reader_handle,
