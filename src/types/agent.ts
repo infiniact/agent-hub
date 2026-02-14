@@ -1,3 +1,33 @@
+export interface AgentSkill {
+  id: string;
+  name: string;
+  skill_type: 'mcp' | 'skill' | 'tool';
+  description: string;
+  task_keywords: string[];
+  constraints: string[];
+  skill_source?: string;
+  license?: string;
+  compatibility?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface SkillDirEntry {
+  skill: AgentSkill;
+  dir_path: string;
+  md_file: string;
+  location: string; // "workspace" | "global"
+  body_content?: string;
+  has_scripts: boolean;
+  has_references: boolean;
+  has_assets: boolean;
+}
+
+export interface SkillDiscoveryResult {
+  skills: SkillDirEntry[];
+  scanned_directories: string[];
+  last_scanned_at: string;
+}
+
 export interface AgentConfig {
   id: string;
   name: string;
@@ -10,6 +40,7 @@ export interface AgentConfig {
   max_tokens: number;
   system_prompt: string;
   capabilities_json: string;
+  skills_json: string;
   acp_command: string | null;
   acp_args_json: string | null;
   is_control_hub: boolean;
@@ -32,6 +63,7 @@ export interface CreateAgentRequest {
   max_tokens?: number;
   system_prompt?: string;
   capabilities_json?: string;
+  skills_json?: string;
   acp_command?: string;
   acp_args_json?: string;
   is_control_hub?: boolean;
@@ -49,6 +81,7 @@ export interface UpdateAgentRequest {
   max_tokens?: number;
   system_prompt?: string;
   capabilities_json?: string;
+  skills_json?: string;
   acp_command?: string;
   acp_args_json?: string;
   is_control_hub?: boolean;

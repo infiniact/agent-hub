@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::db::migrations::{get_agents_dir, get_base_dir};
 use crate::error::{AppError, AppResult};
-use crate::models::agent::AgentConfig;
+use crate::models::agent::{AgentConfig, AgentSkill};
 
 /// Write an agent's configuration to a markdown file with YAML frontmatter.
 pub fn write_agent_md(agent: &AgentConfig) -> AppResult<PathBuf> {
@@ -44,6 +44,7 @@ temperature: {temperature}
 max_tokens: {max_tokens}
 max_concurrency: {max_concurrency}
 capabilities: [{capabilities}]
+skills_json: {skills_json}
 acp_command: "{acp_command}"
 acp_args: [{acp_args}]
 is_control_hub: {is_control_hub}
@@ -61,6 +62,7 @@ is_enabled: {is_enabled}
         max_tokens = agent.max_tokens,
         max_concurrency = agent.max_concurrency,
         capabilities = caps_str,
+        skills_json = agent.skills_json,
         acp_command = agent.acp_command.as_deref().unwrap_or(""),
         acp_args = args_str,
         is_control_hub = agent.is_control_hub,
@@ -110,6 +112,8 @@ pub fn read_agent_md(path: &str) -> AppResult<AgentConfig> {
     let capabilities_str = extract_array_field(&frontmatter, "capabilities");
     let capabilities_json = serde_json::to_string(&capabilities_str).unwrap_or_else(|_| "[]".into());
 
+    let skills_json = extract_field(&frontmatter, "skills_json").unwrap_or_else(|| "[]".into());
+
     let acp_args = extract_array_field(&frontmatter, "acp_args");
     let acp_args_json = if acp_args.is_empty() {
         None
@@ -129,6 +133,7 @@ pub fn read_agent_md(path: &str) -> AppResult<AgentConfig> {
         max_tokens,
         system_prompt: body.to_string(),
         capabilities_json,
+        skills_json,
         acp_command,
         acp_args_json,
         is_control_hub,
@@ -189,7 +194,7 @@ pub fn write_agents_registry(agents: &[AgentConfig]) -> AppResult<PathBuf> {
              - **Model**: {model}\n\
              - **Max Concurrency**: {max_concurrency}\n\
              - **Capabilities**: [{capabilities}]\n\
-             - **Is Control Hub**: {is_control_hub}\n\n",
+             - **Is Control Hub**: {is_control_hub}\n",
             name = agent.name,
             id = agent.id,
             description = if agent.description.is_empty() { "N/A" } else { &agent.description },
@@ -198,6 +203,25 @@ pub fn write_agents_registry(agents: &[AgentConfig]) -> AppResult<PathBuf> {
             capabilities = caps_str,
             is_control_hub = agent.is_control_hub,
         ));
+
+        // Add Skills section
+        let skills: Vec<AgentSkill> = serde_json::from_str(&agent.skills_json)
+            .unwrap_or_default();
+        if !skills.is_empty() {
+            content.push_str("  **Skills**:\n");
+            for skill in &skills {
+                content.push_str(&format!(
+                    "    - [{}] ({}) {}\n      Keywords: [{}]\n      Constraints: [{}]\n",
+                    skill.id,
+                    skill.skill_type,
+                    skill.name,
+                    skill.task_keywords.join(", "),
+                    skill.constraints.join(", "),
+                ));
+            }
+        }
+
+        content.push('\n');
     }
 
     std::fs::write(&file_path, content)

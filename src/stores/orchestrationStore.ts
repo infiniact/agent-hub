@@ -9,7 +9,9 @@ import type {
   OrchToolCall,
   ScheduleTaskRequest,
   RecurrencePattern,
+  PlanValidation,
 } from '@/types/orchestration';
+import type { SkillDiscoveryResult } from '@/types/agent';
 
 interface OrchestrationState {
   activeTaskRun: TaskRun | null;
@@ -19,6 +21,7 @@ interface OrchestrationState {
   streamingAgentId: string | null;
   streamedContent: string;
   taskPlan: TaskPlan | null;
+  planValidation: PlanValidation | null;
   taskRuns: TaskRun[];
   pendingOrchPermission: OrchPermissionRequest | null;
   isAwaitingConfirmation: boolean;
@@ -31,6 +34,8 @@ interface OrchestrationState {
   viewingAgentTracking: Record<string, AgentTrackingInfo>;
   /** Task plan for the viewed task run */
   viewingTaskPlan: TaskPlan | null;
+  /** Discovered skills from workspace scanning */
+  discoveredSkills: SkillDiscoveryResult | null;
 }
 
 interface OrchestrationActions {
@@ -61,6 +66,7 @@ interface OrchestrationActions {
   pauseScheduledTask: (taskRunId: string) => Promise<void>;
   resumeScheduledTask: (taskRunId: string) => Promise<void>;
   clearSchedule: (taskRunId: string) => Promise<void>;
+  discoverWorkspaceSkills: (forceRefresh?: boolean) => Promise<SkillDiscoveryResult | null>;
   reset: () => void;
 }
 
@@ -73,6 +79,7 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
     streamingAgentId: null,
     streamedContent: '',
     taskPlan: null,
+    planValidation: null,
     taskRuns: [],
     pendingOrchPermission: null,
     isAwaitingConfirmation: false,
@@ -81,8 +88,14 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
     viewingAssignments: [],
     viewingAgentTracking: {},
     viewingTaskPlan: null,
+    discoveredSkills: null,
 
     startOrchestration: async (prompt: string) => {
+      const { isOrchestrating } = get();
+      if (isOrchestrating) {
+        throw new Error('An orchestration task is already running. Please wait for it to complete or cancel it first.');
+      }
+
       set({
         isOrchestrating: true,
         activeTaskRun: null,
@@ -91,9 +104,11 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
         streamingAgentId: null,
         streamedContent: '',
         taskPlan: null,
+        planValidation: null,
         pendingOrchPermission: null,
         isAwaitingConfirmation: false,
         expandedAgentId: null,
+        discoveredSkills: null,
       });
 
       try {
@@ -140,24 +155,30 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
       const { activeTaskRun, agentTracking, taskPlan } = get();
       if (!activeTaskRun) return;
 
-      // Build context prompt from previous run
+      // Build context prompt from previous run using Markdown formatting
       const parts: string[] = [];
-      parts.push(`Previous task: ${activeTaskRun.user_prompt}`);
+
+      parts.push('## 上次任务\n');
+      parts.push(activeTaskRun.user_prompt);
+
       if (activeTaskRun.result_summary) {
-        parts.push(`Previous summary: ${activeTaskRun.result_summary}`);
+        parts.push('\n\n---\n\n## 执行摘要\n');
+        parts.push(activeTaskRun.result_summary);
       }
 
       const trackingEntries = Object.values(agentTracking);
       if (trackingEntries.length > 0) {
-        parts.push('Previous agent outputs:');
+        parts.push('\n\n---\n\n## Agent 输出\n');
         for (const info of trackingEntries) {
-          parts.push(`[${info.agentName}] (${info.status}): ${info.output || info.streamedContent || '(no output)'}`);
+          parts.push(`\n### ${info.agentName} (${info.status})\n`);
+          parts.push(info.output || info.streamedContent || '(no output)');
         }
       }
 
-      parts.push(`Additional instructions: ${supplementaryPrompt}`);
+      parts.push('\n\n---\n\n## 补充指令\n');
+      parts.push(supplementaryPrompt);
 
-      const contextPrompt = parts.join('\n');
+      const contextPrompt = parts.join('');
 
       // Reset state and start a new orchestration with the context prompt
       set({
@@ -168,9 +189,11 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
         streamingAgentId: null,
         streamedContent: '',
         taskPlan: null,
+        planValidation: null,
         pendingOrchPermission: null,
         isAwaitingConfirmation: false,
         expandedAgentId: null,
+        discoveredSkills: null,
       });
 
       try {
@@ -194,9 +217,11 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
         streamingAgentId: null,
         streamedContent: '',
         taskPlan: null,
+        planValidation: null,
         pendingOrchPermission: null,
         isAwaitingConfirmation: false,
         expandedAgentId: null,
+        discoveredSkills: null,
       });
     },
 
@@ -406,6 +431,19 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
       }));
     },
 
+    discoverWorkspaceSkills: async (forceRefresh?: boolean) => {
+      try {
+        const result = await tauriInvoke<SkillDiscoveryResult>('discover_workspace_skills', {
+          forceRefresh: forceRefresh ?? false,
+        });
+        set({ discoveredSkills: result });
+        return result;
+      } catch (error) {
+        console.error('[Orchestration] Failed to discover workspace skills:', error);
+        return null;
+      }
+    },
+
     reset: () => {
       set({
         activeTaskRun: null,
@@ -415,9 +453,11 @@ export const useOrchestrationStore = create<OrchestrationState & OrchestrationAc
         streamingAgentId: null,
         streamedContent: '',
         taskPlan: null,
+        planValidation: null,
         pendingOrchPermission: null,
         isAwaitingConfirmation: false,
         expandedAgentId: null,
+        discoveredSkills: null,
       });
     },
   })
@@ -441,11 +481,25 @@ export function initializeOrchestrationListeners() {
     }));
   }).then((unlisten) => orchestrationUnlistenFns.push(unlisten));
 
+  // orchestration:skills_discovered
+  tauriListen<any>('orchestration:skills_discovered', (payload) => {
+    console.log('[Orchestration] Skills discovered:', payload);
+    // Trigger a refresh of discovered skills in the store
+    useOrchestrationStore.getState().discoverWorkspaceSkills();
+  }).then((unlisten) => orchestrationUnlistenFns.push(unlisten));
+
   // orchestration:plan_ready
   tauriListen<any>('orchestration:plan_ready', (payload) => {
     console.log('[Orchestration] Plan ready:', payload);
     const plan = payload?.plan as TaskPlan | undefined;
     useOrchestrationStore.setState({ taskPlan: plan ?? null });
+  }).then((unlisten) => orchestrationUnlistenFns.push(unlisten));
+
+  // orchestration:plan_validated
+  tauriListen<any>('orchestration:plan_validated', (payload) => {
+    console.log('[Orchestration] Plan validated:', payload);
+    const validation = payload?.validation as PlanValidation | undefined;
+    useOrchestrationStore.setState({ planValidation: validation ?? null });
   }).then((unlisten) => orchestrationUnlistenFns.push(unlisten));
 
   // orchestration:agent_started
@@ -455,6 +509,7 @@ export function initializeOrchestrationListeners() {
       useOrchestrationStore.setState((state) => ({
         streamingAgentId: payload.agentId,
         streamedContent: '',
+        expandedAgentId: payload.agentId,
         agentTracking: {
           ...state.agentTracking,
           [payload.agentId]: {
@@ -644,10 +699,15 @@ export function initializeOrchestrationListeners() {
 
   // orchestration:error
   tauriListen<any>('orchestration:error', (payload) => {
-    const errorMsg =
-      payload?.error ||
-      (typeof payload === 'string' ? payload : JSON.stringify(payload));
-    console.error('[Orchestration] Error:', errorMsg, 'Raw payload:', JSON.stringify(payload));
+    let errorMsg = 'Unknown orchestration error';
+    try {
+      errorMsg =
+        payload?.error ||
+        (typeof payload === 'string' ? payload : JSON.stringify(payload));
+    } catch {
+      // payload may not be serializable
+    }
+    console.error('[Orchestration] Error:', errorMsg);
     useOrchestrationStore.setState((state) => ({
       isOrchestrating: false,
       isAwaitingConfirmation: false,

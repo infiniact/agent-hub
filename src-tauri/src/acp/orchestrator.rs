@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use serde::Serialize;
 use tauri::Emitter;
 
-use crate::acp::{client, discovery, manager, provisioner, transport, upgrade};
+use crate::acp::{client, discovery, manager, provisioner, skill_discovery, transport, upgrade};
 use crate::db::{agent_md, agent_repo, settings_repo, task_run_repo};
 use crate::error::{AppError, AppResult};
-use crate::models::agent::AgentConfig;
+use crate::models::agent::{AgentConfig, AgentSkill};
 use crate::models::task_run::{TaskPlan, PlannedAssignment};
 use crate::state::{AppState, ConfirmationAction};
 use crate::db::migrations::{get_output_dir};
+use crate::acp::skill_discovery::SkillDiscoveryResult;
 use tokio_util::sync::CancellationToken;
 
 /// Result from sending a prompt to an agent, including metadata
@@ -33,6 +35,17 @@ pub async fn run_orchestration(
     user_prompt: String,
 ) {
     let result = run_orchestration_inner(&app, &state, &task_run_id, &user_prompt).await;
+
+    // Always clean up the active task run entry so new orchestrations can start
+    {
+        let mut tokens = state.active_task_runs.lock().await;
+        tokens.remove(&task_run_id);
+    }
+    // Clean up per-agent cancellation tokens for this task run
+    {
+        let mut agent_cancels = state.agent_cancellations.lock().await;
+        agent_cancels.retain(|(trid, _), _| trid != &task_run_id);
+    }
 
     if let Err(e) = &result {
         let error_msg = e.to_string();
@@ -92,7 +105,38 @@ async fn run_orchestration_inner(
         "status": "analyzing",
     }));
 
-    // 3. Build agent catalog
+    // 3. Discover workspace skills (cached)
+    let cwd = resolve_orchestrator_working_directory(state);
+    let discovery_result = {
+        let mut cache = state.discovered_skills.lock().await;
+        let needs_scan = match cache.as_ref() {
+            Some(cached) => !cached.scanned_directories.iter().any(|d| d.contains(&cwd)),
+            None => true,
+        };
+        if needs_scan {
+            let cwd_clone = cwd.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                skill_discovery::discover_skills(&cwd_clone)
+            })
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+            log::info!(
+                "Skill discovery: found {} skills from {} directories",
+                result.skills.len(),
+                result.scanned_directories.len(),
+            );
+            *cache = Some(result.clone());
+            let _ = app.emit("orchestration:skills_discovered", &serde_json::json!({
+                "taskRunId": task_run_id,
+                "skillsCount": result.skills.len(),
+            }));
+            Some(result)
+        } else {
+            cache.clone()
+        }
+    };
+
+    // 4. Build agent catalog
     let all_agents: Vec<AgentConfig> = {
         let state_clone = state.clone();
         tokio::task::spawn_blocking(move || agent_repo::list_agents(&state_clone))
@@ -103,7 +147,7 @@ async fn run_orchestration_inner(
     // Filter to only enabled agents for orchestration
     let enabled_agents: Vec<&AgentConfig> = all_agents.iter().filter(|a| a.is_enabled).collect();
 
-    let catalog = build_agent_catalog_refs(&enabled_agents);
+    let catalog = build_agent_catalog_refs(&enabled_agents, discovery_result.as_ref());
 
     // Try to use agents registry file; fall back to inline catalog
     let registry_content = agent_md::read_agents_registry()
@@ -113,23 +157,35 @@ async fn run_orchestration_inner(
     ensure_agent_running(app, state, &hub_agent).await?;
 
     let plan_prompt = format!(
-        r#"You are the orchestrator control hub. Analyze this task and assign it to the most appropriate agents.
+        r#"You are the orchestrator control hub. Decompose the user request into subtasks and assign each to the best-matching agent.
 
-Available agents (from registry):
-{registry_content}
+## Available Agents
 
-User request: {user_prompt}
+{catalog}
 
-Respond with a JSON object (and nothing else) in this exact format:
-{{"analysis": "your analysis of the task", "assignments": [{{"agent_id": "uuid", "task_description": "what this agent should do", "sequence_order": 0, "depends_on": []}}]}}
+## User Request
+
+{user_prompt}
+
+## Instructions
+
+1. Analyze the request and identify subtasks based ONLY on the information above.
+2. Match each subtask to the agent whose skills best fit.
+3. Respect each agent's constraints.
+4. If no agent has a matching skill, choose the most general-purpose agent.
+
+CRITICAL: You MUST respond with ONLY a valid JSON object. No explanations, no preamble, no markdown, no thinking — ONLY the JSON object below. Do NOT attempt to explore, research, or use tools. Make your plan based solely on the agent catalog and user request provided above.
+
+{{"analysis": "Brief reasoning about task decomposition and agent matching", "assignments": [{{"agent_id": "uuid-from-catalog", "task_description": "Detailed instruction for the agent", "sequence_order": 0, "depends_on": [], "matched_skills": ["skill_id"], "selection_reason": "Why this agent"}}]}}
 
 Rules:
-- Only use agent IDs from the available agents list above
-- Set sequence_order starting from 0 for parallel tasks, increment for sequential ones
-- depends_on should list agent_ids whose output is needed as input
-- If only one agent is needed, still return the assignments array with one entry
-- Respect each agent's max_concurrency limit when assigning parallel tasks
-- Do not assign more concurrent instances of an agent than its max_concurrency allows"#
+- Output ONLY the JSON object, nothing else
+- agent_id must come from the catalog above
+- matched_skills must reference skill IDs from the assigned agent
+- sequence_order: 0 for parallel, increment for sequential
+- depends_on: agent_ids whose output is needed first
+- Always return at least one assignment"#,
+        catalog = registry_content,
     );
 
     let plan_response = send_prompt_to_agent(app, state, &hub_agent.id, &plan_prompt, Some(task_run_id), None).await?;
@@ -138,8 +194,44 @@ Rules:
         return Ok(());
     }
 
-    // Parse the plan
-    let plan = parse_task_plan(&plan_response.text)?;
+    // Parse the plan, with one retry on failure
+    let plan = match parse_task_plan(&plan_response.text) {
+        Ok(p) => p,
+        Err(first_err) => {
+            log::warn!("First plan parse failed, retrying with correction prompt: {}", first_err);
+
+            let retry_prompt = format!(
+                "Your previous response was not valid JSON. I need ONLY a raw JSON object, no text before or after it.\n\n\
+                 The expected format is:\n\
+                 {{\"analysis\": \"...\", \"assignments\": [{{\"agent_id\": \"...\", \"task_description\": \"...\", \"sequence_order\": 0, \"depends_on\": [], \"matched_skills\": [\"...\"], \"selection_reason\": \"...\"}}]}}\n\n\
+                 Respond with ONLY the JSON object. No markdown code fences, no explanation."
+            );
+
+            let retry_response = send_prompt_to_agent(app, state, &hub_agent.id, &retry_prompt, Some(task_run_id), None).await?;
+
+            parse_task_plan(&retry_response.text).map_err(|_| first_err)?
+        }
+    };
+
+    // Auto-correct matched_skills before validation
+    let plan = auto_correct_plan_skills(plan, &all_agents, discovery_result.as_ref());
+
+    // Validate skill matching (soft validation — warnings only)
+    let validation = validate_plan_skill_matching(&plan, &all_agents, discovery_result.as_ref());
+    if !validation.is_valid {
+        for av in &validation.assignment_validations {
+            for warning in &av.warnings {
+                log::warn!(
+                    "Skill validation warning for agent '{}' ({}): {}",
+                    av.agent_name, av.agent_id, warning
+                );
+            }
+        }
+    }
+    let _ = app.emit("orchestration:plan_validated", &serde_json::json!({
+        "taskRunId": task_run_id,
+        "validation": &validation,
+    }));
 
     // Validate: warn if hub assigned any disabled agents
     for assignment in &plan.assignments {
@@ -901,18 +993,133 @@ Rules:
     Ok(())
 }
 
-fn build_agent_catalog_refs(agents: &[&AgentConfig]) -> String {
-    agents
-        .iter()
-        .map(|a| {
-            let caps: Vec<String> = serde_json::from_str(&a.capabilities_json).unwrap_or_default();
-            format!(
-                "- ID: {}\n  Name: {}\n  Description: {}\n  Model: {}\n  Capabilities: [{}]\n",
-                a.id, a.name, a.description, a.model,
-                caps.join(", ")
-            )
+fn build_agent_catalog_refs(agents: &[&AgentConfig], discovery: Option<&SkillDiscoveryResult>) -> String {
+    build_structured_agent_catalog(agents, discovery)
+}
+
+/// Build a structured agent catalog in XML format for the control hub prompt.
+/// XML is recommended by the Agent Skills spec for Claude model injection.
+fn build_structured_agent_catalog(agents: &[&AgentConfig], discovery: Option<&SkillDiscoveryResult>) -> String {
+    let mut xml = String::from("<available_agents>\n");
+
+    for a in agents {
+        let skills = if a.is_control_hub {
+            resolve_agent_skills(a)
+        } else {
+            resolve_agent_skills_with_discovery(a, discovery)
+        };
+
+        xml.push_str("  <agent>\n");
+        xml.push_str(&format!("    <id>{}</id>\n", xml_escape(&a.id)));
+        xml.push_str(&format!("    <name>{}</name>\n", xml_escape(&a.name)));
+        xml.push_str(&format!(
+            "    <description>{}</description>\n",
+            xml_escape(if a.description.is_empty() { "N/A" } else { &a.description })
+        ));
+        xml.push_str(&format!("    <model>{}</model>\n", xml_escape(&a.model)));
+        xml.push_str(&format!("    <max_concurrency>{}</max_concurrency>\n", a.max_concurrency));
+
+        if !skills.is_empty() {
+            xml.push_str("    <skills>\n");
+            for skill in &skills {
+                let discovered = skill.skill_source.starts_with("discovered:");
+                xml.push_str(&format!(
+                    "      <skill discovered=\"{}\">\n",
+                    discovered
+                ));
+                xml.push_str(&format!("        <id>{}</id>\n", xml_escape(&skill.id)));
+                xml.push_str(&format!("        <name>{}</name>\n", xml_escape(&skill.name)));
+                xml.push_str(&format!("        <description>{}</description>\n", xml_escape(&skill.description)));
+                if !skill.constraints.is_empty() {
+                    xml.push_str(&format!(
+                        "        <allowed_tools>{}</allowed_tools>\n",
+                        xml_escape(&skill.constraints.join(" "))
+                    ));
+                }
+                if let Some(ref lic) = skill.license {
+                    xml.push_str(&format!("        <license>{}</license>\n", xml_escape(lic)));
+                }
+                if let Some(ref compat) = skill.compatibility {
+                    xml.push_str(&format!("        <compatibility>{}</compatibility>\n", xml_escape(compat)));
+                }
+                xml.push_str("      </skill>\n");
+            }
+            xml.push_str("    </skills>\n");
+        }
+
+        xml.push_str("  </agent>\n");
+    }
+
+    xml.push_str("</available_agents>");
+    xml
+}
+
+/// Escape special XML characters in text content and attribute values.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Resolve the effective skills for an agent.
+/// If `skills_json` is populated, use it directly.
+/// Otherwise, auto-convert `capabilities_json` entries into minimal AgentSkill structs.
+fn resolve_agent_skills(agent: &AgentConfig) -> Vec<AgentSkill> {
+    // Try parsing skills_json first
+    if !agent.skills_json.is_empty() && agent.skills_json != "[]" {
+        if let Ok(skills) = serde_json::from_str::<Vec<AgentSkill>>(&agent.skills_json) {
+            if !skills.is_empty() {
+                return skills;
+            }
+        }
+    }
+
+    // Fallback: convert capabilities_json to minimal skills
+    let capabilities: Vec<String> = serde_json::from_str(&agent.capabilities_json)
+        .unwrap_or_default();
+
+    capabilities
+        .into_iter()
+        .map(|cap| {
+            let id = cap.to_lowercase().replace(' ', "_");
+            let keywords = vec![cap.to_lowercase()];
+            AgentSkill {
+                id,
+                name: cap,
+                skill_type: "skill".into(),
+                description: String::new(),
+                task_keywords: keywords,
+                constraints: Vec::new(),
+                skill_source: String::new(),
+                license: None,
+                compatibility: None,
+                metadata: std::collections::HashMap::new(),
+            }
         })
-        .collect::<String>()
+        .collect()
+}
+
+/// Resolve skills for a non-control-hub agent, merging manual skills with discovered skills.
+/// Manual skills take priority (dedup by ID).
+fn resolve_agent_skills_with_discovery(
+    agent: &AgentConfig,
+    discovery: Option<&SkillDiscoveryResult>,
+) -> Vec<AgentSkill> {
+    let mut skills = resolve_agent_skills(agent);
+
+    if let Some(disc) = discovery {
+        let existing_ids: std::collections::HashSet<String> =
+            skills.iter().map(|s| s.id.clone()).collect();
+
+        for entry in &disc.skills {
+            if !existing_ids.contains(&entry.skill.id) {
+                skills.push(entry.skill.clone());
+            }
+        }
+    }
+
+    skills
 }
 
 fn build_feedback_prompt(outputs: &HashMap<String, String>, agents: &[AgentConfig]) -> String {
@@ -929,40 +1136,409 @@ fn build_feedback_prompt(outputs: &HashMap<String, String>, agents: &[AgentConfi
     parts.join("\n")
 }
 
-fn parse_task_plan(response: &str) -> AppResult<TaskPlan> {
-    // Try to find JSON in the response
-    let json_str = extract_json_from_response(response);
-
-    serde_json::from_str::<TaskPlan>(&json_str)
-        .map_err(|e| AppError::Internal(format!(
-            "Failed to parse task plan from Control Hub response: {e}\nResponse: {response}"
-        )))
+#[derive(Debug, Clone, Serialize)]
+struct AssignmentValidation {
+    agent_id: String,
+    agent_name: String,
+    warnings: Vec<String>,
 }
 
-fn extract_json_from_response(response: &str) -> String {
-    // Try to find a JSON block between ```json and ```
-    if let Some(start) = response.find("```json") {
-        let after = &response[start + 7..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim().to_string();
+#[derive(Debug, Clone, Serialize)]
+struct PlanValidation {
+    is_valid: bool,
+    assignment_validations: Vec<AssignmentValidation>,
+    total_warnings: usize,
+}
+
+/// Validate that the plan's skill matching is consistent with declared agent skills.
+/// This is a soft validation — it only produces warnings, not errors.
+fn validate_plan_skill_matching(
+    plan: &TaskPlan,
+    agents: &[AgentConfig],
+    discovery: Option<&SkillDiscoveryResult>,
+) -> PlanValidation {
+    let mut assignment_validations = Vec::new();
+
+    for assignment in &plan.assignments {
+        let mut warnings = Vec::new();
+        let agent_name;
+
+        if let Some(agent) = agents.iter().find(|a| a.id == assignment.agent_id) {
+            agent_name = agent.name.clone();
+            let resolved_skills = if agent.is_control_hub {
+                resolve_agent_skills(agent)
+            } else {
+                resolve_agent_skills_with_discovery(agent, discovery)
+            };
+
+            // Check: task description keywords hit a skill's constraints
+            let desc_lower = assignment.task_description.to_lowercase();
+            for skill in &resolved_skills {
+                for constraint in &skill.constraints {
+                    let constraint_lower = constraint.to_lowercase();
+                    // Simple keyword overlap check
+                    let constraint_words: Vec<&str> = constraint_lower.split_whitespace().collect();
+                    let match_count = constraint_words.iter()
+                        .filter(|w| w.len() > 3 && desc_lower.contains(**w))
+                        .count();
+                    if match_count >= 2 {
+                        warnings.push(format!(
+                            "Task may violate constraint on skill '{}': {}",
+                            skill.id, constraint
+                        ));
+                    }
+                }
+            }
+        } else {
+            agent_name = "Unknown".into();
+            warnings.push(format!(
+                "Agent ID '{}' not found in registered agents",
+                assignment.agent_id
+            ));
+        }
+
+        if !warnings.is_empty() {
+            assignment_validations.push(AssignmentValidation {
+                agent_id: assignment.agent_id.clone(),
+                agent_name,
+                warnings,
+            });
         }
     }
-    // Try to find JSON between ``` and ```
-    if let Some(start) = response.find("```") {
-        let after = &response[start + 3..];
-        if let Some(end) = after.find("```") {
-            let candidate = after[..end].trim();
-            if candidate.starts_with('{') {
-                return candidate.to_string();
+
+    let total_warnings: usize = assignment_validations.iter()
+        .map(|v| v.warnings.len())
+        .sum();
+
+    PlanValidation {
+        is_valid: total_warnings == 0,
+        assignment_validations,
+        total_warnings,
+    }
+}
+
+/// Auto-correct `matched_skills` in a parsed plan to reference valid skill IDs.
+///
+/// For each assignment:
+/// - Non-existent skill IDs are replaced with the closest match from the agent's skills
+///   (using normalized string comparison: lowercase, hyphens/spaces → underscores).
+/// - Empty `matched_skills` are inferred from the task description via keyword overlap
+///   with skill names, IDs, descriptions, and task_keywords.
+fn auto_correct_plan_skills(
+    mut plan: TaskPlan,
+    agents: &[AgentConfig],
+    discovery: Option<&SkillDiscoveryResult>,
+) -> TaskPlan {
+    for assignment in &mut plan.assignments {
+        let agent = match agents.iter().find(|a| a.id == assignment.agent_id) {
+            Some(a) => a,
+            None => continue,
+        };
+
+        let resolved_skills = if agent.is_control_hub {
+            resolve_agent_skills(agent)
+        } else {
+            resolve_agent_skills_with_discovery(agent, discovery)
+        };
+
+        if resolved_skills.is_empty() {
+            continue;
+        }
+
+        let skill_ids: Vec<&str> = resolved_skills.iter().map(|s| s.id.as_str()).collect();
+
+        if assignment.matched_skills.is_empty() {
+            // Infer skills from task description
+            let desc_lower = assignment.task_description.to_lowercase();
+            let mut matched = Vec::new();
+
+            for skill in &resolved_skills {
+                // Check if any keyword from the skill matches the task description
+                let hit = skill.task_keywords.iter().any(|kw| {
+                    kw.len() > 2 && desc_lower.contains(&kw.to_lowercase())
+                }) || desc_lower.contains(&skill.name.to_lowercase())
+                   || desc_lower.contains(&skill.id.to_lowercase())
+                   || (!skill.description.is_empty()
+                       && skill_description_overlaps(&desc_lower, &skill.description));
+
+                if hit {
+                    matched.push(skill.id.clone());
+                }
+            }
+
+            if !matched.is_empty() {
+                log::info!(
+                    "Auto-corrected empty matched_skills for agent '{}': inferred {:?}",
+                    agent.name, matched,
+                );
+                assignment.matched_skills = matched;
+            }
+        } else {
+            // Fix non-existent skill IDs by finding closest match
+            let mut corrected = Vec::new();
+            for skill_id in &assignment.matched_skills {
+                if skill_ids.contains(&skill_id.as_str()) {
+                    corrected.push(skill_id.clone());
+                } else if let Some(best) = find_closest_skill_id(skill_id, &skill_ids) {
+                    log::info!(
+                        "Auto-corrected skill '{}' → '{}' for agent '{}'",
+                        skill_id, best, agent.name,
+                    );
+                    corrected.push(best);
+                }
+                // else: no close match found, drop it silently
+            }
+
+            if corrected.is_empty() {
+                // All IDs were invalid and dropped — fall back to inference
+                let desc_lower = assignment.task_description.to_lowercase();
+                let mut inferred = Vec::new();
+
+                for skill in &resolved_skills {
+                    let hit = skill.task_keywords.iter().any(|kw| {
+                        kw.len() > 2 && desc_lower.contains(&kw.to_lowercase())
+                    }) || desc_lower.contains(&skill.name.to_lowercase())
+                       || desc_lower.contains(&skill.id.to_lowercase())
+                       || (!skill.description.is_empty()
+                           && skill_description_overlaps(&desc_lower, &skill.description));
+
+                    if hit {
+                        inferred.push(skill.id.clone());
+                    }
+                }
+
+                if !inferred.is_empty() {
+                    log::info!(
+                        "All matched_skills were invalid for agent '{}'; inferred {:?} from task description",
+                        agent.name, inferred,
+                    );
+                }
+                assignment.matched_skills = inferred;
+            } else {
+                assignment.matched_skills = corrected;
             }
         }
     }
-    // Try to find raw JSON object
+
+    plan
+}
+
+/// Normalize a string for fuzzy skill-ID comparison: lowercase, replace hyphens/spaces with underscores.
+fn normalize_skill_id(s: &str) -> String {
+    s.to_lowercase().replace(['-', ' '], "_")
+}
+
+/// Find the closest matching skill ID using normalized comparison.
+/// Returns `Some(matched_id)` if a reasonable match is found, `None` otherwise.
+fn find_closest_skill_id(target: &str, candidates: &[&str]) -> Option<String> {
+    let norm_target = normalize_skill_id(target);
+
+    // Exact match after normalization
+    for &cand in candidates {
+        if normalize_skill_id(cand) == norm_target {
+            return Some(cand.to_string());
+        }
+    }
+
+    // Substring containment (either direction)
+    for &cand in candidates {
+        let norm_cand = normalize_skill_id(cand);
+        if norm_cand.contains(&norm_target) || norm_target.contains(&norm_cand) {
+            return Some(cand.to_string());
+        }
+    }
+
+    None
+}
+
+/// Check if a task description has meaningful word overlap with a skill description.
+/// Returns true if at least 2 words of length >3 from the skill description appear in the task.
+fn skill_description_overlaps(task_lower: &str, skill_desc: &str) -> bool {
+    let desc_lower = skill_desc.to_lowercase();
+    let words: Vec<&str> = desc_lower.split_whitespace().collect();
+    let hits = words.iter().filter(|w| w.len() > 3 && task_lower.contains(**w)).count();
+    hits >= 2
+}
+
+fn parse_task_plan(response: &str) -> AppResult<TaskPlan> {
+    let json_str = extract_json_from_response(response);
+    let sanitized = sanitize_llm_json(&json_str);
+
+    serde_json::from_str::<TaskPlan>(&sanitized)
+        .map_err(|e| {
+            // Truncate response preview — use char-aware slicing to avoid panics on multi-byte chars
+            let preview = if response.chars().count() > 500 {
+                let truncated: String = response.chars().take(500).collect();
+                format!("{}...(truncated, {} chars total)", truncated, response.chars().count())
+            } else {
+                response.to_string()
+            };
+            AppError::Internal(format!(
+                "Failed to parse task plan from Control Hub response: {e}\nResponse preview: {preview}"
+            ))
+        })
+}
+
+/// Sanitize JSON produced by LLMs — fix common issues that cause parse failures:
+/// 1. Unescaped control characters (literal newlines, tabs, etc.) inside string values
+/// 2. Unescaped double quotes inside string values (e.g. Chinese text like "重来又如何")
+/// 3. Trailing commas before `}` or `]`
+///
+/// For unescaped quotes we use a look-ahead heuristic: a `"` inside a string is the
+/// *real* closing quote only if the next non-whitespace byte is a JSON structural
+/// character (`:`, `,`, `}`, `]`) or end-of-input.  Otherwise it is content and gets
+/// escaped as `\"`.
+fn sanitize_llm_json(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() + 64);
+    let mut in_string = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        if in_string {
+            if b == b'\\' {
+                // Escaped sequence — copy the backslash and the next byte verbatim
+                out.push(b);
+                if i + 1 < bytes.len() {
+                    i += 1;
+                    out.push(bytes[i]);
+                }
+            } else if b == b'"' {
+                // Is this the real closing quote, or an unescaped content quote?
+                // Look ahead past whitespace for a JSON structural character.
+                let mut k = i + 1;
+                while k < bytes.len()
+                    && matches!(bytes[k], b' ' | b'\t' | b'\n' | b'\r')
+                {
+                    k += 1;
+                }
+                if k >= bytes.len()
+                    || matches!(bytes[k], b':' | b',' | b'}' | b']')
+                {
+                    // Real closing quote
+                    in_string = false;
+                    out.push(b);
+                } else {
+                    // Content quote — escape it
+                    out.extend_from_slice(b"\\\"");
+                }
+            } else if b < 0x20 {
+                // Unescaped control character — escape it
+                match b {
+                    b'\n' => out.extend_from_slice(b"\\n"),
+                    b'\r' => out.extend_from_slice(b"\\r"),
+                    b'\t' => out.extend_from_slice(b"\\t"),
+                    _ => {
+                        out.extend_from_slice(format!("\\u{:04x}", b).as_bytes());
+                    }
+                }
+            } else {
+                out.push(b);
+            }
+        } else {
+            if b == b'"' {
+                in_string = true;
+            }
+            out.push(b);
+        }
+        i += 1;
+    }
+
+    let s = String::from_utf8(out).unwrap_or_else(|_| input.to_string());
+
+    // Pass 2: remove trailing commas before } or ]
+    let bytes2 = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes2.len());
+    let mut in_str = false;
+    let mut esc = false;
+    let mut j = 0;
+    while j < bytes2.len() {
+        let b = bytes2[j];
+        if esc {
+            esc = false;
+            result.push(b);
+            j += 1;
+            continue;
+        }
+        if in_str {
+            if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            result.push(b);
+            j += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_str = true;
+            result.push(b);
+            j += 1;
+            continue;
+        }
+        if b == b',' {
+            let mut k = j + 1;
+            while k < bytes2.len() && matches!(bytes2[k], b' ' | b'\t' | b'\n' | b'\r') {
+                k += 1;
+            }
+            if k < bytes2.len() && (bytes2[k] == b'}' || bytes2[k] == b']') {
+                j += 1;
+                continue;
+            }
+        }
+        result.push(b);
+        j += 1;
+    }
+
+    String::from_utf8(result).unwrap_or(s)
+}
+
+fn extract_json_from_response(response: &str) -> String {
+    // Strategy 1: Find the first '{' and use brace-depth matching to find its closing '}'.
+    // This is the most robust approach as it handles embedded code fences in JSON strings.
     if let Some(start) = response.find('{') {
-        if let Some(end) = response.rfind('}') {
+        let bytes = response.as_bytes();
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut end = start;
+
+        for i in start..bytes.len() {
+            let ch = bytes[i] as char;
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            if ch == '\\' && in_string {
+                escape_next = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            if ch == '{' {
+                depth += 1;
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+        }
+
+        if depth == 0 && end > start {
             return response[start..=end].to_string();
         }
     }
+
+    // Fallback: return as-is
     response.to_string()
 }
 
@@ -1035,6 +1611,11 @@ async fn ensure_agent_running(
     Ok(())
 }
 
+/// Stall detection: if no text chunk is received for this many seconds, send a continue nudge.
+const STALL_TIMEOUT_SECS: u64 = 120;
+/// Maximum number of continue nudges before giving up on a stalled agent.
+const MAX_CONTINUE_NUDGES: usize = 3;
+
 /// Send a prompt to an agent and collect the complete text response.
 /// This creates a session if needed and waits for the full result.
 /// Also forwards tool_call, thought events and extracts token usage.
@@ -1106,6 +1687,10 @@ async fn send_prompt_to_agent(
     let mut cache_read_tokens: i64 = 0;
     let mut jsonrpc_error: Option<String> = None;
 
+    // Stall detection state
+    let mut last_text_chunk_at = std::time::Instant::now();
+    let mut continue_nudges_sent: usize = 0;
+
     loop {
         // Check per-agent cancellation
         if let Some(token) = cancel_token {
@@ -1118,7 +1703,7 @@ async fn send_prompt_to_agent(
             let mut processes = state.agent_processes.lock().await;
             if let Some(process) = processes.get_mut(agent_id) {
                 match tokio::time::timeout(
-                    std::time::Duration::from_secs(300),
+                    std::time::Duration::from_secs(STALL_TIMEOUT_SECS),
                     transport::receive_message(process),
                 )
                 .await
@@ -1129,8 +1714,51 @@ async fn send_prompt_to_agent(
                         None
                     }
                     Err(_) => {
-                        log::warn!("Timeout receiving orchestration message");
-                        None
+                        // Timeout — check if this is a stall (no text output)
+                        if last_text_chunk_at.elapsed() >= std::time::Duration::from_secs(STALL_TIMEOUT_SECS)
+                            && continue_nudges_sent < MAX_CONTINUE_NUDGES
+                        {
+                            log::info!(
+                                "Agent {} stalled for {}s without text output, sending continue nudge ({}/{})",
+                                agent_id,
+                                last_text_chunk_at.elapsed().as_secs(),
+                                continue_nudges_sent + 1,
+                                MAX_CONTINUE_NUDGES,
+                            );
+                            // Send continue prompt to the same ACP session
+                            let nudge_request_id = chrono::Utc::now().timestamp_millis();
+                            let nudge_sent = {
+                                let mut procs = state.agent_processes.lock().await;
+                                if let Some(process) = procs.get_mut(agent_id) {
+                                    client::send_prompt(
+                                        process, &acp_session_id,
+                                        "Please continue your work.",
+                                        nudge_request_id,
+                                    ).await.is_ok()
+                                } else { false }
+                            };
+                            if nudge_sent {
+                                continue_nudges_sent += 1;
+                                last_text_chunk_at = std::time::Instant::now();
+                                let _ = app.emit("orchestration:agent_nudged", &serde_json::json!({
+                                    "agentId": agent_id,
+                                    "nudgeCount": continue_nudges_sent,
+                                    "maxNudges": MAX_CONTINUE_NUDGES,
+                                }));
+                                continue; // Keep collecting messages
+                            }
+                            // Send failed — give up
+                            None
+                        } else if continue_nudges_sent >= MAX_CONTINUE_NUDGES {
+                            log::warn!(
+                                "Agent {} still stalled after {} continue nudges, giving up",
+                                agent_id, continue_nudges_sent,
+                            );
+                            None
+                        } else {
+                            log::warn!("Timeout receiving orchestration message from agent {}", agent_id);
+                            None
+                        }
                     }
                 }
             } else {
@@ -1161,6 +1789,7 @@ async fn send_prompt_to_agent(
                                     .and_then(|t| t.as_str())
                                 {
                                     collected_text.push_str(text);
+                                    last_text_chunk_at = std::time::Instant::now();
 
                                     let _ = app.emit("orchestration:agent_chunk", &serde_json::json!({
                                         "agentId": agent_id,
@@ -1286,8 +1915,10 @@ async fn send_prompt_to_agent(
                                         "jsonrpc": "2.0",
                                         "id": perm_response_id,
                                         "result": {
-                                            "outcome": "selected",
-                                            "optionId": option_id,
+                                            "outcome": {
+                                                "outcome": "selected",
+                                                "optionId": option_id,
+                                            }
                                         }
                                     });
                                     use tokio::io::AsyncWriteExt;
@@ -1304,8 +1935,11 @@ async fn send_prompt_to_agent(
                         }
                     }
                     "" => {
-                        // JSON-RPC response — end of prompt
-                        // Extract token usage if present
+                        // JSON-RPC response — check if this is for the original prompt or a nudge
+                        let response_id = msg.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let is_original_response = response_id == request_id;
+
+                        // Extract token usage from any response (original or nudge)
                         if let Some(result) = msg.get("result") {
                             if let Some(usage) = result.get("usage") {
                                 log::info!("Token usage from agent: {}", serde_json::to_string(&usage).unwrap_or_default());
@@ -1339,9 +1973,14 @@ async fn send_prompt_to_agent(
                                 .unwrap_or(0);
                             jsonrpc_error = Some(format!("Agent error (code {}): {}", err_code, err_msg));
                         }
-                        if msg.get("result").is_some() || msg.get("error").is_some() {
-                            break;
+
+                        if is_original_response {
+                            // Original prompt completed — break out of the loop
+                            if msg.get("result").is_some() || msg.get("error").is_some() {
+                                break;
+                            }
                         }
+                        // Nudge response: don't break, keep collecting messages
                     }
                     _ => {}
                 }

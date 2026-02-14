@@ -1,6 +1,30 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSkill {
+    pub id: String,
+    pub name: String,
+    pub skill_type: String,
+    pub description: String,
+    #[serde(default)]
+    pub task_keywords: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    /// Source of this skill: "", "manual", "discovered:mcp", "discovered:project"
+    #[serde(default)]
+    pub skill_source: String,
+    /// SPDX license identifier (Agent Skills spec)
+    #[serde(default)]
+    pub license: Option<String>,
+    /// Compatibility string, e.g. "claude" (Agent Skills spec)
+    #[serde(default)]
+    pub compatibility: Option<String>,
+    /// Arbitrary key-value metadata from SKILL.md frontmatter (Agent Skills spec)
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub id: String,
     pub name: String,
@@ -13,6 +37,8 @@ pub struct AgentConfig {
     pub max_tokens: i64,
     pub system_prompt: String,
     pub capabilities_json: String,
+    #[serde(default = "default_skills")]
+    pub skills_json: String,
     pub acp_command: Option<String>,
     pub acp_args_json: Option<String>,
     pub is_control_hub: bool,
@@ -44,6 +70,8 @@ pub struct CreateAgentRequest {
     pub system_prompt: String,
     #[serde(default = "default_capabilities")]
     pub capabilities_json: String,
+    #[serde(default = "default_skills")]
+    pub skills_json: String,
     pub acp_command: Option<String>,
     pub acp_args_json: Option<String>,
     #[serde(default)]
@@ -64,6 +92,7 @@ pub struct UpdateAgentRequest {
     pub max_tokens: Option<i64>,
     pub system_prompt: Option<String>,
     pub capabilities_json: Option<String>,
+    pub skills_json: Option<String>,
     pub acp_command: Option<String>,
     pub acp_args_json: Option<String>,
     pub is_control_hub: Option<bool>,
@@ -121,6 +150,9 @@ fn default_max_tokens() -> i64 {
     4096
 }
 fn default_capabilities() -> String {
+    "[]".into()
+}
+fn default_skills() -> String {
     "[]".into()
 }
 fn default_max_concurrency() -> i64 {

@@ -20,7 +20,10 @@ export function TaskHistoryPanel() {
   const rateTaskRun = useOrchestrationStore((s) => s.rateTaskRun);
   const scheduleTask = useOrchestrationStore((s) => s.scheduleTask);
   const clearSchedule = useOrchestrationStore((s) => s.clearSchedule);
+  const startOrchestration = useOrchestrationStore((s) => s.startOrchestration);
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
+  const [restartText, setRestartText] = useState("");
+  const [isRestarting, setIsRestarting] = useState(false);
 
   if (!viewingTaskRun) {
     return (
@@ -131,6 +134,45 @@ export function TaskHistoryPanel() {
           onScheduleTask={scheduleTask}
           onClearSchedule={clearSchedule}
         />
+      )}
+
+      {/* Restart task */}
+      {isCompleted && (
+        <div className="rounded-lg border border-slate-200 dark:border-border-dark/50 bg-white dark:bg-surface-dark p-3">
+          <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-gray-400 mb-2">
+            Restart Task
+          </p>
+          <textarea
+            value={restartText}
+            onChange={(e) => setRestartText(e.target.value)}
+            placeholder="Optional: add supplementary instructions or modifications..."
+            className="w-full px-3 py-2 rounded-lg bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-border-dark/50 text-sm text-slate-700 dark:text-gray-300 placeholder:text-slate-400 dark:placeholder:text-gray-500 resize-none focus:outline-none focus:ring-1 focus:ring-primary/50 min-h-[60px]"
+            rows={2}
+          />
+          <div className="flex items-center gap-2 mt-2">
+            <button
+              disabled={isRestarting}
+              onClick={async () => {
+                setIsRestarting(true);
+                const prompt = restartText.trim()
+                  ? `${viewingTaskRun.user_prompt}\n\n---\n\nSupplementary instructions:\n${restartText.trim()}`
+                  : viewingTaskRun.user_prompt;
+                clearViewingTaskRun();
+                try {
+                  await startOrchestration(prompt);
+                } catch (e) {
+                  console.error('[TaskHistory] Restart failed:', e);
+                } finally {
+                  setIsRestarting(false);
+                }
+              }}
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium bg-primary text-white hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            >
+              <Codicon name="debug-restart" className="text-[14px]" />
+              {isRestarting ? "Starting..." : "Restart"}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

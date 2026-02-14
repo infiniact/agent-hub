@@ -32,10 +32,11 @@ export function InlinePermission({ request, onResponse, onDismiss }: InlinePermi
 
   const toolName = request.toolCall?.title || "Tool execution";
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (optionOverride?: string) => {
+    const optionId = optionOverride || selectedOption;
     setIsSubmitting(true);
     try {
-      await onResponse(selectedOption, userMessage.trim() || undefined);
+      await onResponse(optionId, userMessage.trim() || undefined);
     } finally {
       setIsSubmitting(false);
     }
@@ -53,39 +54,38 @@ export function InlinePermission({ request, onResponse, onDismiss }: InlinePermi
   };
 
   return (
-    <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 rounded-lg px-3 py-2 mb-2">
+    <div className="bg-amber-50 dark:bg-amber-950/30 border-2 border-amber-300 dark:border-amber-700/50 rounded-lg px-4 py-3 shadow-lg shadow-amber-500/10 animate-in fade-in">
       {/* Header - always visible */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          <span className="text-xs font-medium text-amber-700 dark:text-amber-400 shrink-0">
-            Permission:
-          </span>
-          <span className="text-xs font-mono text-slate-700 dark:text-gray-300 truncate">
-            {toolName}
+          <Codicon name="shield" className="text-[16px] text-amber-500 flex-none" />
+          <span className="text-xs font-bold text-amber-700 dark:text-amber-400 shrink-0">
+            Permission Required
           </span>
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
           {/* Quick action buttons when collapsed */}
           {!expanded && (
             <>
               <button
-                onClick={() => {
-                  setSelectedOption("allow");
-                  handleSubmit();
-                }}
+                onClick={() => handleSubmit("allow")}
                 disabled={isSubmitting}
-                className="px-2 py-1 text-xs font-medium bg-emerald-500 hover:bg-emerald-600 text-white rounded transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 text-xs font-medium bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors disabled:opacity-50"
               >
                 Allow
               </button>
               <button
-                onClick={() => {
-                  setSelectedOption("reject");
-                  handleSubmit();
-                }}
+                onClick={() => handleSubmit("allow_always")}
                 disabled={isSubmitting}
-                className="px-2 py-1 text-xs font-medium bg-rose-500 hover:bg-rose-600 text-white rounded transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 text-xs font-medium bg-primary hover:bg-primary/90 text-white rounded-lg transition-colors disabled:opacity-50"
+              >
+                Always Allow
+              </button>
+              <button
+                onClick={() => handleSubmit("reject")}
+                disabled={isSubmitting}
+                className="px-3 py-1.5 text-xs font-medium bg-rose-500 hover:bg-rose-600 text-white rounded-lg transition-colors disabled:opacity-50"
               >
                 Deny
               </button>
@@ -95,7 +95,7 @@ export function InlinePermission({ request, onResponse, onDismiss }: InlinePermi
           {/* Expand/collapse button */}
           <button
             onClick={() => setExpanded(!expanded)}
-            className="size-6 flex items-center justify-center rounded hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
+            className="size-7 flex items-center justify-center rounded-lg hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors"
           >
             {expanded ? (
               <Codicon name="chevron-up" className="text-[14px] text-amber-700 dark:text-amber-400" />
@@ -106,12 +106,17 @@ export function InlinePermission({ request, onResponse, onDismiss }: InlinePermi
         </div>
       </div>
 
+      {/* Tool name */}
+      <p className="text-xs font-mono text-slate-600 dark:text-gray-400 mt-1 truncate" title={toolName}>
+        {toolName}
+      </p>
+
       {/* Expanded content */}
       {expanded && (
         <div className="mt-2 pt-2 border-t border-amber-200 dark:border-amber-800/50 space-y-2">
           {/* Tool input details */}
           {request.toolCall?.rawInput && (
-            <pre className="text-xs text-slate-600 dark:text-gray-400 bg-white dark:bg-slate-900/50 rounded px-2 py-1 overflow-x-auto">
+            <pre className="text-xs text-slate-600 dark:text-gray-400 bg-white dark:bg-slate-900/50 rounded px-2 py-1 overflow-x-auto max-h-40 overflow-y-auto">
               {typeof request.toolCall.rawInput === "string"
                 ? request.toolCall.rawInput
                 : JSON.stringify(request.toolCall.rawInput, null, 2)}
@@ -154,7 +159,7 @@ export function InlinePermission({ request, onResponse, onDismiss }: InlinePermi
 
           {/* Submit button */}
           <button
-            onClick={handleSubmit}
+            onClick={() => handleSubmit()}
             disabled={isSubmitting}
             className={`w-full py-1.5 text-xs font-medium text-white rounded-lg transition-all flex items-center justify-center gap-1.5 ${
               isSubmitting

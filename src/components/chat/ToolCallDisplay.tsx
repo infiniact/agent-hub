@@ -1,6 +1,7 @@
 "use client";
 
 import { Codicon } from "@/components/ui/Codicon";
+import { GeneratedFileBlock } from "@/components/chat/GeneratedFileBlock";
 import { useState } from "react";
 
 interface ToolCallProps {
@@ -15,6 +16,17 @@ interface ToolCallProps {
   };
 }
 
+/** Extract file path and content from a fs/write_text_file tool call's rawInput. */
+function extractFileWriteInfo(rawInput: any): { path: string; content: string } | null {
+  if (!rawInput) return null;
+  const input = typeof rawInput === "string" ? (() => { try { return JSON.parse(rawInput); } catch { return null; } })() : rawInput;
+  if (!input) return null;
+  const path = input.path || input.filePath || input.file_path;
+  const content = input.content || input.text || "";
+  if (typeof path === "string" && path) return { path, content: String(content) };
+  return null;
+}
+
 export function ToolCallDisplay({ toolCall }: ToolCallProps) {
   const [expanded, setExpanded] = useState(false);
 
@@ -22,6 +34,28 @@ export function ToolCallDisplay({ toolCall }: ToolCallProps) {
   const isCompleted = toolCall.status === "completed" || toolCall.status === "complete";
   const isFailed = toolCall.status === "failed" || toolCall.status === "error";
   const isRunning = toolCall.status === "running" || isPending;
+
+  // Check if this is a file write tool call
+  const isFileWrite = toolCall.name === "fs/write_text_file" || toolCall.name === "write_text_file";
+  const fileInfo = isFileWrite ? extractFileWriteInfo(toolCall.rawInput) : null;
+
+  // If it's a completed file write with valid info, render as GeneratedFileBlock
+  if (isFileWrite && fileInfo && (isCompleted || isRunning)) {
+    return (
+      <div className="space-y-1">
+        <div className="flex items-center gap-2 px-1">
+          {isRunning && !isCompleted && (
+            <Codicon name="loading" className="text-[14px] text-primary codicon-modifier-spin flex-none" />
+          )}
+          {isCompleted && (
+            <Codicon name="pass-filled" className="text-[14px] text-emerald-400 flex-none" />
+          )}
+          <span className="text-[10px] text-slate-400 dark:text-gray-500">Write file</span>
+        </div>
+        <GeneratedFileBlock path={fileInfo.path} content={fileInfo.content} />
+      </div>
+    );
+  }
 
   // Build a short description from title or rawInput
   const description = toolCall.title || toolCall.name;

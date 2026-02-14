@@ -73,6 +73,8 @@ pub fn run() {
             commands::chat_commands::cancel_prompt,
             commands::chat_commands::get_messages,
             commands::chat_commands::respond_permission,
+            commands::chat_commands::save_generated_file,
+            commands::chat_commands::open_file_with_default_app,
             // ACP commands
             commands::acp_commands::discover_agents,
             commands::acp_commands::spawn_agent,
@@ -101,6 +103,7 @@ pub fn run() {
             commands::orchestration_commands::pause_scheduled_task,
             commands::orchestration_commands::resume_scheduled_task,
             commands::orchestration_commands::clear_schedule,
+            commands::orchestration_commands::discover_workspace_skills,
             // Settings commands
             commands::settings_commands::get_settings,
             commands::settings_commands::update_settings,

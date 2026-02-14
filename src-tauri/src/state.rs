@@ -130,6 +130,8 @@ pub struct AppState {
     pub pending_orch_permissions: Arc<Mutex<HashMap<OrchPermissionKey, tokio::sync::oneshot::Sender<String>>>>,
     /// Scheduler state for background task execution
     pub scheduler: Arc<Mutex<Option<SchedulerState>>>,
+    /// Cached skill discovery result from workspace scanning
+    pub discovered_skills: Arc<Mutex<Option<crate::acp::skill_discovery::SkillDiscoveryResult>>>,
 }
 
 impl AppState {
@@ -145,6 +147,7 @@ impl AppState {
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             pending_orch_permissions: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Arc::new(Mutex::new(None)),
+            discovered_skills: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -163,6 +166,7 @@ impl Clone for AppState {
             pending_confirmations: Arc::clone(&self.pending_confirmations),
             pending_orch_permissions: Arc::clone(&self.pending_orch_permissions),
             scheduler: Arc::clone(&self.scheduler),
+            discovered_skills: Arc::clone(&self.discovered_skills),
         }
     }
 }

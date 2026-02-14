@@ -6,6 +6,7 @@ pub mod manager;
 pub mod orchestrator;
 pub mod permissions;
 pub mod provisioner;
+pub mod skill_discovery;
 pub mod terminal;
 pub mod transport;
 pub mod upgrade;

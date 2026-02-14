@@ -1,5 +1,5 @@
-use crate::acp::orchestrator;
-use crate::db::{agent_repo, task_run_repo};
+use crate::acp::{orchestrator, skill_discovery};
+use crate::db::{agent_repo, settings_repo, task_run_repo};
 use crate::error::{AppError, AppResult};
 use crate::models::agent::AgentConfig;
 use crate::models::task_run::{CreateTaskRunRequest, ScheduleTaskRequest, TaskAssignment, TaskRun};
@@ -12,6 +12,16 @@ pub async fn start_orchestration(
     state: tauri::State<'_, AppState>,
     request: CreateTaskRunRequest,
 ) -> AppResult<TaskRun> {
+    // Guard: reject if an orchestration is already running
+    {
+        let tokens = state.active_task_runs.lock().await;
+        if !tokens.is_empty() {
+            return Err(AppError::InvalidRequest(
+                "An orchestration task is already running. Please wait for it to complete or cancel it before starting a new one.".into()
+            ));
+        }
+    }
+
     // Verify control hub exists
     let hub: AgentConfig = {
         let state_clone = state.inner().clone();
@@ -343,4 +353,55 @@ pub async fn clear_schedule(
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
     Ok(())
+}
+
+/// Discover skills from the skills/ directories in the workspace and global config.
+/// Results are cached; pass `force_refresh: true` to re-scan.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn discover_workspace_skills(
+    state: tauri::State<'_, AppState>,
+    force_refresh: Option<bool>,
+) -> AppResult<skill_discovery::SkillDiscoveryResult> {
+    let force = force_refresh.unwrap_or(false);
+
+    // Resolve working directory
+    let cwd = if let Ok(Some(setting)) = settings_repo::get_setting(state.inner(), "working_directory") {
+        if !setting.value.is_empty() {
+            setting.value
+        } else {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".into())
+        }
+    } else {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".into())
+    };
+
+    // Check cache
+    if !force {
+        let cache = state.discovered_skills.lock().await;
+        if let Some(ref cached) = *cache {
+            if cached.scanned_directories.iter().any(|d| d.contains(&cwd)) {
+                return Ok(cached.clone());
+            }
+        }
+    }
+
+    // Run discovery (blocking I/O)
+    let cwd_clone = cwd.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        skill_discovery::discover_skills(&cwd_clone)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // Cache the result
+    {
+        let mut cache = state.discovered_skills.lock().await;
+        *cache = Some(result.clone());
+    }
+
+    Ok(result)
 }

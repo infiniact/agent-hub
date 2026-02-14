@@ -184,31 +184,35 @@ async fn deploy_builtin(adapter_dir: &PathBuf) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to write package.json: {e}"))?;
 
-    // 5. Delete package-lock.json and node_modules to force a clean install.
-    //    This ensures no stale packages (e.g. a previously npm-installed
-    //    @zed-industries/claude-code-acp with a nested old SDK) survive.
-    let lock_path = adapter_dir.join("package-lock.json");
-    if lock_path.exists() {
-        let _ = tokio::fs::remove_file(&lock_path).await;
-    }
-    let nm_dir = adapter_dir.join("node_modules");
-    if nm_dir.exists() {
-        let _ = tokio::fs::remove_dir_all(&nm_dir).await;
-        log::info!("Removed old node_modules for clean install");
-    }
-
-    // 6. Run npm install
+    // 5. Run npm install into a temporary directory first, then swap.
+    //    This ensures the existing node_modules survives if npm install fails
+    //    (e.g. npm not found on PATH in packaged app environments).
     let enriched_path = get_enriched_path();
     let npm_path = resolve_npm(&enriched_path)?;
 
+    let tmp_install_dir = adapter_dir.join("_install_tmp");
+    // Clean any leftover temp dir
+    if tmp_install_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&tmp_install_dir).await;
+    }
+    tokio::fs::create_dir_all(&tmp_install_dir)
+        .await
+        .map_err(|e| format!("Failed to create tmp install dir: {e}"))?;
+
+    // Copy package.json into temp dir
+    let tmp_pkg_path = tmp_install_dir.join("package.json");
+    tokio::fs::copy(&pkg_path, &tmp_pkg_path)
+        .await
+        .map_err(|e| format!("Failed to copy package.json to tmp: {e}"))?;
+
     log::info!(
         "Built-in agent: running npm install in {:?}",
-        adapter_dir
+        tmp_install_dir
     );
 
     let output = tokio::process::Command::new(&npm_path)
         .arg("install")
-        .current_dir(adapter_dir)
+        .current_dir(&tmp_install_dir)
         .env("PATH", &enriched_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -219,7 +223,41 @@ async fn deploy_builtin(adapter_dir: &PathBuf) -> Result<(), String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("npm install failed: {}", stderr.trim()));
+        // Clean up temp dir but keep existing node_modules intact
+        let _ = tokio::fs::remove_dir_all(&tmp_install_dir).await;
+        return Err(format!("npm install failed (existing install preserved): {}", stderr.trim()));
+    }
+
+    // npm install succeeded — now swap node_modules
+    let nm_dir = adapter_dir.join("node_modules");
+    let old_nm_dir = adapter_dir.join("_node_modules_old");
+
+    // Move old node_modules out of the way (if exists)
+    if nm_dir.exists() {
+        let _ = tokio::fs::rename(&nm_dir, &old_nm_dir).await;
+    }
+
+    // Move new node_modules into place
+    let tmp_nm = tmp_install_dir.join("node_modules");
+    if let Err(e) = tokio::fs::rename(&tmp_nm, &nm_dir).await {
+        // Rollback: restore old node_modules
+        if old_nm_dir.exists() {
+            let _ = tokio::fs::rename(&old_nm_dir, &nm_dir).await;
+        }
+        let _ = tokio::fs::remove_dir_all(&tmp_install_dir).await;
+        return Err(format!("Failed to move new node_modules: {e}"));
+    }
+
+    // Clean up old and temp dirs
+    if old_nm_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&old_nm_dir).await;
+    }
+    let _ = tokio::fs::remove_dir_all(&tmp_install_dir).await;
+
+    // Delete stale package-lock.json from main dir
+    let lock_path = adapter_dir.join("package-lock.json");
+    if lock_path.exists() {
+        let _ = tokio::fs::remove_file(&lock_path).await;
     }
 
     // Log installed SDK version

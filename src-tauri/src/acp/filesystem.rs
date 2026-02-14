@@ -10,7 +10,7 @@ use crate::error::AppResult;
 /// - Inside `~/.iaagenthub/` (app data / agent metadata)
 /// - Inside the system temp directory
 /// - If no trusted directory is set, allow all paths (backwards compatible)
-fn is_path_allowed(path: &str, trusted_dir: Option<&str>) -> bool {
+pub fn is_path_allowed(path: &str, trusted_dir: Option<&str>) -> bool {
     let Some(trusted) = trusted_dir else {
         return true;
     };

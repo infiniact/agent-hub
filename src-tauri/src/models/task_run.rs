@@ -96,6 +96,10 @@ pub struct PlannedAssignment {
     pub sequence_order: i64,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub matched_skills: Vec<String>,
+    #[serde(default)]
+    pub selection_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

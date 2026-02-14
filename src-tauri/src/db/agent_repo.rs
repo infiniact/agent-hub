@@ -17,20 +17,21 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<AgentConfig> {
         max_tokens: row.get(8)?,
         system_prompt: row.get(9)?,
         capabilities_json: row.get(10)?,
-        acp_command: row.get(11)?,
-        acp_args_json: row.get(12)?,
-        is_control_hub: row.get::<_, i32>(13)? != 0,
-        md_file_path: row.get(14)?,
-        max_concurrency: row.get(15)?,
-        available_models_json: row.get(16)?,
-        is_enabled: row.get::<_, i32>(17)? != 0,
-        disabled_reason: row.get(18)?,
-        created_at: row.get(19)?,
-        updated_at: row.get(20)?,
+        skills_json: row.get(11)?,
+        acp_command: row.get(12)?,
+        acp_args_json: row.get(13)?,
+        is_control_hub: row.get::<_, i32>(14)? != 0,
+        md_file_path: row.get(15)?,
+        max_concurrency: row.get(16)?,
+        available_models_json: row.get(17)?,
+        is_enabled: row.get::<_, i32>(18)? != 0,
+        disabled_reason: row.get(19)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
     })
 }
 
-const SELECT_COLS: &str = "id, name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, acp_command, acp_args_json, is_control_hub, md_file_path, max_concurrency, available_models_json, is_enabled, disabled_reason, created_at, updated_at";
+const SELECT_COLS: &str = "id, name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, skills_json, acp_command, acp_args_json, is_control_hub, md_file_path, max_concurrency, available_models_json, is_enabled, disabled_reason, created_at, updated_at";
 
 pub fn list_agents(state: &AppState) -> AppResult<Vec<AgentConfig>> {
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
@@ -65,7 +66,7 @@ pub fn create_agent(state: &AppState, req: CreateAgentRequest) -> AppResult<Agen
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
 
     db.execute(
-        "INSERT INTO agents (id, name, icon, description, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, acp_command, acp_args_json, is_control_hub, max_concurrency) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO agents (id, name, icon, description, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, skills_json, acp_command, acp_args_json, is_control_hub, max_concurrency) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             id,
             req.name,
@@ -77,6 +78,7 @@ pub fn create_agent(state: &AppState, req: CreateAgentRequest) -> AppResult<Agen
             req.max_tokens,
             req.system_prompt,
             req.capabilities_json,
+            req.skills_json,
             req.acp_command,
             req.acp_args_json,
             req.is_control_hub as i32,
@@ -103,6 +105,7 @@ pub fn update_agent(state: &AppState, id: &str, req: UpdateAgentRequest) -> AppR
     let max_tokens = req.max_tokens.unwrap_or(existing.max_tokens);
     let system_prompt = req.system_prompt.unwrap_or(existing.system_prompt);
     let capabilities_json = req.capabilities_json.unwrap_or(existing.capabilities_json);
+    let skills_json = req.skills_json.unwrap_or(existing.skills_json);
     let acp_command = req.acp_command.or(existing.acp_command);
     let acp_args_json = req.acp_args_json.or(existing.acp_args_json);
     let is_control_hub = req.is_control_hub.unwrap_or(existing.is_control_hub);
@@ -119,8 +122,8 @@ pub fn update_agent(state: &AppState, id: &str, req: UpdateAgentRequest) -> AppR
     };
 
     db.execute(
-        "UPDATE agents SET name=?1, icon=?2, description=?3, status=?4, execution_mode=?5, model=?6, temperature=?7, max_tokens=?8, system_prompt=?9, capabilities_json=?10, acp_command=?11, acp_args_json=?12, is_control_hub=?13, max_concurrency=?14, available_models_json=?15, is_enabled=?16, disabled_reason=?17, updated_at=datetime('now') WHERE id=?18",
-        params![name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, acp_command, acp_args_json, is_control_hub as i32, max_concurrency, available_models_json, is_enabled as i32, disabled_reason, id],
+        "UPDATE agents SET name=?1, icon=?2, description=?3, status=?4, execution_mode=?5, model=?6, temperature=?7, max_tokens=?8, system_prompt=?9, capabilities_json=?10, skills_json=?11, acp_command=?12, acp_args_json=?13, is_control_hub=?14, max_concurrency=?15, available_models_json=?16, is_enabled=?17, disabled_reason=?18, updated_at=datetime('now') WHERE id=?19",
+        params![name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, skills_json, acp_command, acp_args_json, is_control_hub as i32, max_concurrency, available_models_json, is_enabled as i32, disabled_reason, id],
     )
     .map_err(|e| AppError::Database(e.to_string()))?;
 

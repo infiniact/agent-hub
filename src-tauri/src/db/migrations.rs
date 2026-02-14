@@ -58,6 +58,7 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         ("006_cache_tokens", include_str!("../../migrations/006_cache_tokens.sql")),
         ("007_rating", include_str!("../../migrations/007_rating.sql")),
         ("008_scheduling", include_str!("../../migrations/008_scheduling.sql")),
+        ("009_agent_skills", include_str!("../../migrations/009_agent_skills.sql")),
     ];
 
     for (name, sql) in migrations {

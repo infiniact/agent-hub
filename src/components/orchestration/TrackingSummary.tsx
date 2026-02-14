@@ -36,10 +36,10 @@ export function TrackingSummary({ taskRun, agentTracking, onRateTask, onRateComp
     setUserFeedback(feedback);
     const rating = feedback === 'thumbsup' ? 5 : 2;
     onRateTask?.(taskRun.id, rating);
-    // Auto-close after rating
+    // Brief delay to show the selection, then dismiss back to new conversation
     setTimeout(() => {
       onRateComplete?.();
-    }, 300);
+    }, 500);
   };
 
   const handleSchedule = async (request: ScheduleTaskRequest) => {
@@ -148,8 +148,8 @@ export function TrackingSummary({ taskRun, agentTracking, onRateTask, onRateComp
       {/* Result summary with feedback buttons */}
       {taskRun.result_summary && (
         <div className="mt-3 pt-3 border-t border-slate-100 dark:border-border-dark/30">
-          <p className="text-xs text-slate-500 dark:text-gray-500 font-medium mb-1">Result</p>
-          <div className="text-xs text-slate-600 dark:text-gray-400 mb-2">
+          <p className="text-xs font-bold uppercase tracking-wider text-emerald-500 dark:text-emerald-400 mb-2">Result</p>
+          <div className="rounded-lg bg-slate-50 dark:bg-black/20 px-4 py-3 text-xs text-slate-600 dark:text-gray-400">
             <MarkdownContent content={taskRun.result_summary} className="text-xs" />
           </div>
         </div>
@@ -216,6 +216,16 @@ export function TrackingSummary({ taskRun, agentTracking, onRateTask, onRateComp
                 userFeedback === 'thumbsdown' && "text-rose-500"
               )}
             />
+          </button>
+
+          {/* Dismiss button */}
+          <button
+            onClick={() => onRateComplete?.()}
+            className="p-2.5 rounded-lg bg-slate-100 dark:bg-white/5 text-slate-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-white/10 transition-all"
+            aria-label="Dismiss"
+            title="Dismiss"
+          >
+            <Codicon name="close" className="text-[20px]" />
           </button>
         </div>
       )}

@@ -62,6 +62,20 @@ export interface PlannedAssignment {
   task_description: string;
   sequence_order: number;
   depends_on: string[];
+  matched_skills?: string[];
+  selection_reason?: string;
+}
+
+export interface AssignmentValidation {
+  agent_id: string;
+  agent_name: string;
+  warnings: string[];
+}
+
+export interface PlanValidation {
+  is_valid: boolean;
+  assignment_validations: AssignmentValidation[];
+  total_warnings: number;
 }
 
 export interface AgentTrackingInfo {

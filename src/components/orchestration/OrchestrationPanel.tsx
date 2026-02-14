@@ -4,9 +4,9 @@ import { useOrchestrationStore } from "@/stores/orchestrationStore";
 import { AgentTracker } from "./AgentTracker";
 import { TaskPlanView } from "./TaskPlanView";
 import { TrackingSummary } from "./TrackingSummary";
-import { InlinePermission } from "@/components/chat/InlinePermission";
 import { Codicon } from "@/components/ui/Codicon";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
+import { useState } from "react";
 
 export function OrchestrationPanel() {
   const activeTaskRun = useOrchestrationStore((s) => s.activeTaskRun);
@@ -16,18 +16,21 @@ export function OrchestrationPanel() {
   const streamingAgentId = useOrchestrationStore((s) => s.streamingAgentId);
   const cancelOrchestration = useOrchestrationStore((s) => s.cancelOrchestration);
   const isAwaitingConfirmation = useOrchestrationStore((s) => s.isAwaitingConfirmation);
-  const pendingOrchPermission = useOrchestrationStore((s) => s.pendingOrchPermission);
   const expandedAgentId = useOrchestrationStore((s) => s.expandedAgentId);
   const setExpandedAgentId = useOrchestrationStore((s) => s.setExpandedAgentId);
   const confirmResults = useOrchestrationStore((s) => s.confirmResults);
   const regenerateAgent = useOrchestrationStore((s) => s.regenerateAgent);
   const regenerateAll = useOrchestrationStore((s) => s.regenerateAll);
-  const respondToOrchPermission = useOrchestrationStore((s) => s.respondToOrchPermission);
   const cancelAgent = useOrchestrationStore((s) => s.cancelAgent);
   const dismissTaskRun = useOrchestrationStore((s) => s.dismissTaskRun);
   const rateTaskRun = useOrchestrationStore((s) => s.rateTaskRun);
+  const planValidation = useOrchestrationStore((s) => s.planValidation);
   const scheduleTask = useOrchestrationStore((s) => s.scheduleTask);
   const clearSchedule = useOrchestrationStore((s) => s.clearSchedule);
+  const continueOrchestration = useOrchestrationStore((s) => s.continueOrchestration);
+
+  const [supplementaryText, setSupplementaryText] = useState("");
+  const [isSummarizing, setIsSummarizing] = useState(false);
 
   if (!activeTaskRun) {
     return (
@@ -99,35 +102,27 @@ export function OrchestrationPanel() {
       </div>
 
       {/* Plan */}
-      {taskPlan && <TaskPlanView plan={taskPlan} agentTracking={agentTracking} />}
+      {taskPlan && <TaskPlanView plan={taskPlan} agentTracking={agentTracking} planValidation={planValidation} />}
 
-      {/* Orchestration permission dialog */}
-      {pendingOrchPermission && (
-        <InlinePermission
-          request={{
-            id: pendingOrchPermission.requestId,
-            sessionId: pendingOrchPermission.sessionId,
-            toolCall: pendingOrchPermission.toolCall,
-            options: pendingOrchPermission.options,
-          }}
-          onResponse={(optionId) => {
-            respondToOrchPermission(
-              pendingOrchPermission.taskRunId,
-              pendingOrchPermission.agentId,
-              String(pendingOrchPermission.requestId),
-              optionId
-            );
-          }}
-          onDismiss={() => {
-            // Auto-allow on dismiss
-            respondToOrchPermission(
-              pendingOrchPermission.taskRunId,
-              pendingOrchPermission.agentId,
-              String(pendingOrchPermission.requestId),
-              "allow"
-            );
-          }}
-        />
+      {/* Validation warnings */}
+      {planValidation && !planValidation.is_valid && (
+        <div className="rounded-lg border border-amber-300 dark:border-amber-700/40 bg-amber-50 dark:bg-amber-950/10 p-3">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Codicon name="warning" className="text-[14px] text-amber-500" />
+            <span className="text-xs font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+              Skill Matching Warnings ({planValidation.total_warnings})
+            </span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {planValidation.assignment_validations.map((av) =>
+              av.warnings.map((warning, wi) => (
+                <div key={`${av.agent_id}-${wi}`} className="text-[11px] text-amber-700 dark:text-amber-300/80">
+                  <span className="font-medium">{av.agent_name}:</span> {warning}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       )}
 
       {/* Agent execution tracking */}
@@ -157,16 +152,44 @@ export function OrchestrationPanel() {
       {isAwaitingConfirmation && (
         <div className="rounded-lg border-2 border-amber-300 dark:border-amber-700/50 bg-amber-50 dark:bg-amber-950/20 px-4 py-3">
           <p className="text-sm font-medium text-amber-800 dark:text-amber-300 mb-2">
-            All agents completed. Review results and confirm.
+            All agents completed. Review results and confirm, or provide supplementary instructions.
           </p>
+
+          {/* Supplementary instructions input */}
+          <div className="mb-3">
+            <textarea
+              value={supplementaryText}
+              onChange={(e) => setSupplementaryText(e.target.value)}
+              placeholder="Optional: provide modifications or supplementary instructions..."
+              className="w-full px-3 py-2 rounded-lg bg-white dark:bg-black/20 border border-amber-200 dark:border-amber-800/50 text-sm text-slate-700 dark:text-gray-300 placeholder:text-slate-400 dark:placeholder:text-gray-500 resize-none focus:outline-none focus:ring-1 focus:ring-primary/50 min-h-[60px]"
+              rows={2}
+            />
+          </div>
+
           <div className="flex items-center gap-2">
             <button
-              onClick={() => confirmResults(activeTaskRun.id)}
+              onClick={() => {
+                setIsSummarizing(true);
+                confirmResults(activeTaskRun.id);
+              }}
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium bg-primary text-white hover:bg-primary/90 transition-colors"
             >
               <Codicon name="pass-filled" className="text-[14px]" />
               Confirm
             </button>
+            {supplementaryText.trim() && (
+              <button
+                onClick={async () => {
+                  const text = supplementaryText.trim();
+                  setSupplementaryText("");
+                  await continueOrchestration(text);
+                }}
+                className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium bg-amber-500 text-white hover:bg-amber-600 transition-colors"
+              >
+                <Codicon name="debug-restart" className="text-[14px]" />
+                Continue with Instructions
+              </button>
+            )}
             <button
               onClick={() => regenerateAll(activeTaskRun.id)}
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors"
@@ -175,6 +198,16 @@ export function OrchestrationPanel() {
               Re-run All
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Summarizing indicator (after confirmation, before completion) */}
+      {isSummarizing && !isAwaitingConfirmation && !isCompleted && (
+        <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 flex items-center gap-3">
+          <Codicon name="loading" className="codicon-modifier-spin text-primary text-[16px]" />
+          <p className="text-sm text-slate-600 dark:text-gray-400">
+            Generating result summary...
+          </p>
         </div>
       )}
 

@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { AgentTrackingInfo } from "@/types/orchestration";
 import { Codicon } from "@/components/ui/Codicon";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
+import { GeneratedFileBlock } from "@/components/chat/GeneratedFileBlock";
 
 interface AgentTrackerProps {
   info: AgentTrackingInfo;
@@ -110,10 +111,31 @@ export function AgentTracker({
       )}
 
       {/* Streaming preview (when not expanded) */}
-      {!isExpanded && isStreaming && info.streamedContent && (
+      {!isExpanded && (isStreaming || info.status === 'running') && info.streamedContent && (
         <div className="mt-2 max-h-24 overflow-y-auto rounded bg-slate-50 dark:bg-black/20 px-3 py-2 text-xs text-slate-600 dark:text-gray-400">
           <MarkdownContent content={info.streamedContent.slice(-500)} className="text-xs" />
           <span className="inline-block w-1.5 h-3.5 bg-primary animate-pulse ml-0.5" />
+        </div>
+      )}
+
+      {/* Tool calls preview (when not expanded but has tool calls) */}
+      {!isExpanded && info.toolCalls && info.toolCalls.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {info.toolCalls.slice(-3).map((tc) => (
+            <ToolCallRow key={tc.toolCallId} toolCall={tc} />
+          ))}
+          {info.toolCalls.length > 3 && (
+            <p className="text-[10px] text-slate-400 dark:text-gray-500 pl-2">
+              +{info.toolCalls.length - 3} more tool calls
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Completed output preview (when not expanded and agent finished) */}
+      {!isExpanded && !isStreaming && info.status !== 'running' && (info.output || info.streamedContent) && (
+        <div className="mt-2 max-h-24 overflow-y-auto rounded bg-slate-50 dark:bg-black/20 px-3 py-2 text-xs text-slate-600 dark:text-gray-400">
+          <MarkdownContent content={(info.output || info.streamedContent || "").slice(-500)} className="text-xs" />
         </div>
       )}
 
@@ -154,8 +176,39 @@ export function AgentTracker({
   );
 }
 
+/** Extract file path and content from a fs/write_text_file tool call's rawInput. */
+function extractFileWriteInfo(rawInput: any): { path: string; content: string } | null {
+  if (!rawInput) return null;
+  const input = typeof rawInput === "string" ? (() => { try { return JSON.parse(rawInput); } catch { return null; } })() : rawInput;
+  if (!input) return null;
+  const path = input.path || input.filePath || input.file_path;
+  const content = input.content || input.text || "";
+  if (typeof path === "string" && path) return { path, content: String(content) };
+  return null;
+}
+
 function ToolCallRow({ toolCall }: { toolCall: NonNullable<AgentTrackingInfo["toolCalls"]>[number] }) {
   const [showDetail, setShowDetail] = useState(false);
+
+  const isFileWrite = toolCall.name === "fs/write_text_file" || toolCall.name === "write_text_file";
+  const isCompleted = toolCall.status === "completed" || toolCall.status === "tool_call_update";
+  const fileInfo = isFileWrite ? extractFileWriteInfo(toolCall.rawInput) : null;
+
+  // Render file write tool calls with GeneratedFileBlock
+  if (isFileWrite && fileInfo) {
+    return (
+      <div className="rounded bg-slate-50 dark:bg-black/10 px-2 py-1.5 space-y-1.5">
+        <div className="flex items-center gap-2">
+          <Codicon name="wrench" className={`text-[12px] ${isCompleted ? "text-emerald-400" : "text-slate-400"}`} />
+          <span className="text-[11px] font-medium text-slate-700 dark:text-gray-300 truncate flex-1">
+            Write file
+          </span>
+          <span className={`text-[10px] ${isCompleted ? "text-emerald-400" : "text-slate-400"}`}>{toolCall.status}</span>
+        </div>
+        <GeneratedFileBlock path={fileInfo.path} content={fileInfo.content} />
+      </div>
+    );
+  }
 
   const statusColor =
     toolCall.status === "completed" || toolCall.status === "tool_call_update"

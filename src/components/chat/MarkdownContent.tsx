@@ -3,8 +3,25 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { memo, useCallback } from "react";
+import { memo } from "react";
 import type { Components } from "react-markdown";
+import { tauriInvoke } from "@/lib/tauri";
+
+/** Check if text looks like an absolute file path. */
+function isFilePath(text: string): boolean {
+  const trimmed = text.trim();
+  // Absolute paths: /Users/..., /home/..., /tmp/..., C:\..., ~/...
+  if (!/^(\/|~\/|[A-Z]:\\)/.test(trimmed)) return false;
+  // Must have a file extension
+  const lastSegment = trimmed.split(/[/\\]/).pop() || "";
+  return /\.\w{1,10}$/.test(lastSegment);
+}
+
+function handleOpenFile(path: string) {
+  tauriInvoke("open_file_with_default_app", { path: path.trim() }).catch((err) => {
+    console.error("[MarkdownContent] Failed to open file:", err);
+  });
+}
 
 const components: Components = {
   // Add language label to code blocks
@@ -16,6 +33,22 @@ const components: Components = {
     const isInline = !className;
 
     if (isInline) {
+      // Check if the content is a file path
+      const text = typeof children === "string" ? children : String(children ?? "");
+      if (isFilePath(text)) {
+        return (
+          <code
+            className={`${className || ""} cursor-pointer hover:text-primary hover:underline transition-colors`}
+            onClick={() => handleOpenFile(text)}
+            title={`Open ${text.trim()}`}
+            role="button"
+            {...props}
+          >
+            {children}
+          </code>
+        );
+      }
+
       return (
         <code className={className} {...props}>
           {children}
