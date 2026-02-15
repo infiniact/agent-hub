@@ -59,6 +59,7 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         ("007_rating", include_str!("../../migrations/007_rating.sql")),
         ("008_scheduling", include_str!("../../migrations/008_scheduling.sql")),
         ("009_agent_skills", include_str!("../../migrations/009_agent_skills.sql")),
+        ("010_workspaces", include_str!("../../migrations/010_workspaces.sql")),
     ];
 
     for (name, sql) in migrations {
@@ -71,8 +72,13 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
             .unwrap_or(false);
 
         if !already_applied {
-            conn.execute_batch(sql)
-                .map_err(|e| AppError::Database(format!("Migration '{name}' failed: {e}")))?;
+            // For workspace migration, handle ALTER TABLE columns that may partially exist
+            if name == "010_workspaces" {
+                run_workspace_migration(conn, sql)?;
+            } else {
+                conn.execute_batch(sql)
+                    .map_err(|e| AppError::Database(format!("Migration '{name}' failed: {e}")))?;
+            }
 
             conn.execute(
                 "INSERT INTO _migrations (name) VALUES (?1)",
@@ -83,6 +89,66 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
             log::info!("Applied migration: {}", name);
         }
     }
+
+    Ok(())
+}
+
+/// Helper to check if a column exists on a table.
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    let sql = format!("PRAGMA table_info({})", table);
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let rows = match stmt.query_map([], |row| row.get::<_, String>(1)) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    for col in rows.flatten() {
+        if col == column {
+            return true;
+        }
+    }
+    false
+}
+
+/// Run the 010_workspaces migration, adding columns only if they don't exist.
+fn run_workspace_migration(conn: &Connection, base_sql: &str) -> AppResult<()> {
+    // Run the base SQL (CREATE TABLE IF NOT EXISTS, INSERT OR IGNORE, etc.)
+    conn.execute_batch(base_sql)
+        .map_err(|e| AppError::Database(format!("Migration '010_workspaces' base SQL failed: {e}")))?;
+
+    // Add workspace_id columns if they don't already exist
+    let columns_to_add = [
+        ("agents", "workspace_id", "TEXT DEFAULT NULL"),
+        ("sessions", "workspace_id", "TEXT DEFAULT NULL"),
+        ("task_runs", "workspace_id", "TEXT DEFAULT NULL"),
+    ];
+
+    for (table, column, col_type) in &columns_to_add {
+        if !has_column(conn, table, column) {
+            let alter_sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_type);
+            conn.execute_batch(&alter_sql)
+                .map_err(|e| AppError::Database(format!(
+                    "Migration '010_workspaces': failed to add {}.{}: {}", table, column, e
+                )))?;
+            log::info!("Added column {}.{}", table, column);
+        }
+    }
+
+    // Assign existing rows to the default workspace
+    conn.execute_batch(
+        "UPDATE agents SET workspace_id = 'default-workspace' WHERE workspace_id IS NULL;
+         UPDATE sessions SET workspace_id = 'default-workspace' WHERE workspace_id IS NULL;
+         UPDATE task_runs SET workspace_id = 'default-workspace' WHERE workspace_id IS NULL;"
+    ).map_err(|e| AppError::Database(format!("Migration '010_workspaces' data migration failed: {e}")))?;
+
+    // Create indexes if they don't exist
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
+         CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_id);
+         CREATE INDEX IF NOT EXISTS idx_task_runs_workspace ON task_runs(workspace_id);"
+    ).map_err(|e| AppError::Database(format!("Migration '010_workspaces' index creation failed: {e}")))?;
 
     Ok(())
 }

@@ -4,9 +4,10 @@ import { useEffect } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useAcpStore } from "@/stores/acpStore";
 import { useAgentStore } from "@/stores/agentStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { useChatStore } from "@/stores/chatStore";
 import { initializeChatListeners } from "@/stores/chatStore";
-import { initializeOrchestrationListeners } from "@/stores/orchestrationStore";
+import { initializeOrchestrationListeners, useOrchestrationStore } from "@/stores/orchestrationStore";
 import { isTauri } from "@/lib/tauri";
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -14,6 +15,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const loadWorkingDirectory = useSettingsStore((s) => s.loadWorkingDirectory);
   const scanForAgents = useAcpStore((s) => s.scanForAgents);
   const fetchAgents = useAgentStore((s) => s.fetchAgents);
+  const fetchWorkspaces = useWorkspaceStore((s) => s.fetchWorkspaces);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -23,6 +25,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
     loadSettings();
     loadWorkingDirectory();
     scanForAgents();
+
+    // Fetch workspaces, then restore incomplete task runs once workspace is known
+    fetchWorkspaces().then(() => {
+      useOrchestrationStore.getState().restoreIncompleteTaskRun();
+    });
 
     // Fetch agents then merge DB-cached models into discoveredAgents
     fetchAgents().then(() => {
@@ -47,7 +54,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     initializeOrchestrationListeners();
 
     console.log('[Providers] App initialized');
-  }, [loadSettings, loadWorkingDirectory, scanForAgents, fetchAgents]);
+  }, [loadSettings, loadWorkingDirectory, scanForAgents, fetchAgents, fetchWorkspaces]);
 
   return <>{children}</>;
 }

@@ -29,6 +29,7 @@ export interface TaskRun {
   recurrence_pattern_json: string | null;
   next_run_at: string | null;
   is_paused: boolean;
+  workspace_id: string | null;
 }
 
 export interface TaskAssignment {
@@ -93,6 +94,15 @@ export interface AgentTrackingInfo {
   output?: string;
   toolCalls?: OrchToolCall[];
   assignmentId?: string;
+  a2aCalls?: A2aCallInfo[];
+}
+
+export interface A2aCallInfo {
+  targetAgentId: string;
+  targetAgentName: string;
+  prompt: string;
+  result?: string;
+  iteration: number;
 }
 
 export interface OrchToolCall {
@@ -111,6 +121,19 @@ export interface OrchPermissionRequest {
   sessionId: string;
   toolCall?: { toolCallId: string; title: string; rawInput?: any };
   options: Array<{ optionId: string; name: string; kind: string }>;
+}
+
+/** Per-task-run state for parallel orchestration */
+export interface TaskRunState {
+  taskRun: TaskRun;
+  assignments: TaskAssignment[];
+  agentTracking: Record<string, AgentTrackingInfo>;
+  streamingAgentId: string | null;
+  streamedContent: string;
+  taskPlan: TaskPlan | null;
+  planValidation: PlanValidation | null;
+  isAwaitingConfirmation: boolean;
+  expandedAgentId: string | null;
 }
 
 // Scheduling request types

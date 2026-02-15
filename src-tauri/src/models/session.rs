@@ -9,6 +9,8 @@ pub struct Session {
     pub acp_session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +20,8 @@ pub struct CreateSessionRequest {
     pub title: String,
     #[serde(default = "default_mode")]
     pub mode: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 fn default_title() -> String {

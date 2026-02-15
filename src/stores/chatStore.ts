@@ -7,6 +7,7 @@ import type {
 } from '@/types/chat';
 import { useEffect } from 'react';
 import { useAcpStore } from './acpStore';
+import { showError } from './toastStore';
 
 interface PermissionRequest {
   id: number | string;
@@ -64,7 +65,13 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
 
   fetchSessions: async (agentId) => {
     try {
-      const sessions = await tauriInvoke<Session[]>('list_sessions', { agentId });
+      // Import here to avoid circular dependency
+      const { useWorkspaceStore } = await import('./workspaceStore');
+      const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+      const sessions = await tauriInvoke<Session[]>('list_sessions', {
+        agentId,
+        workspaceId,
+      });
       set({ sessions });
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
@@ -135,10 +142,14 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
 
     // Create a new session
     console.log('[ChatStore] Creating new session for agent:', agentId);
+    // Import here to avoid circular dependency
+    const { useWorkspaceStore } = await import('./workspaceStore');
+    const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
     const newSession = await get().createSession({
       agent_id: agentId,
       title: 'New Conversation',
       mode: 'chat',
+      workspace_id: workspaceId ?? undefined,
     });
     console.log('[ChatStore] Created new session:', newSession.id);
     set({ currentSessionId: newSession.id });
@@ -183,6 +194,7 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
     if (!sessionId) {
       const error = 'No active session. Please select an agent first.';
       console.error('[ChatStore]', error);
+      showError('发送失败', error);
       get().addToolCall({
         id: `error-${Date.now()}`,
         name: 'Error',
@@ -200,6 +212,7 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
       set((state) => ({ messages: [...state.messages, result] }));
     } catch (error) {
       console.error('[ChatStore] Failed to send prompt:', error);
+      showError('发送消息失败', error);
       // Show error to user
       const errorMsg = error instanceof Error ? error.message : String(error);
       get().addToolCall({
@@ -223,11 +236,21 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
   },
 
   appendStreamChunk: (chunk) => {
+    // Only accept while actively streaming in the current session.
+    // After a workspace switch isStreaming is reset to false, so stale
+    // events from the previous workspace's session are silently dropped.
+    if (!get().isStreaming) return;
     set((state) => ({ streamedContent: state.streamedContent + chunk }));
   },
 
   completeMessage: (msg) => {
     const state = get();
+
+    // Guard: ignore late completions from a different session (e.g. after workspace switch)
+    if (state.currentSessionId && msg.session_id !== state.currentSessionId) {
+      console.log('[ChatStore] Ignoring completeMessage for stale session:', msg.session_id);
+      return;
+    }
 
     // Build the completed message using accumulated streamed content and tool calls,
     // since the backend msg may only contain the ACP result (not the full text).
@@ -265,6 +288,8 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
   },
 
   addToolCall: (toolCall) => {
+    // Only accept while actively streaming
+    if (!get().isStreaming) return;
     set((state) => {
       // Deduplicate: if a tool call with the same ID exists, update it instead
       const exists = state.toolCalls.some((tc) => tc.id === toolCall.id);
@@ -457,6 +482,7 @@ export function initializeChatListeners() {
   tauriListen<any>('acp:error', (payload) => {
     console.error('[ChatStore] Received error:', payload);
     const errorMessage = payload?.message || payload?.data || 'Unknown agent error';
+    showError('Agent 错误', errorMessage);
     useChatStore.getState().addToolCall({
       id: `error-${Date.now()}`,
       name: 'Error',

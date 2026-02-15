@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Codicon } from "@/components/ui/Codicon";
 import { useChatStore } from "@/stores/chatStore";
 import { useAgentStore } from "@/stores/agentStore";
-import { useOrchestrationStore } from "@/stores/orchestrationStore";
+import { useOrchestrationStore, useFocusedTaskRunState } from "@/stores/orchestrationStore";
 
 export function ChatInput() {
   const [text, setText] = useState("");
@@ -16,14 +16,17 @@ export function ChatInput() {
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
   const controlHubAgentId = useAgentStore((s) => s.controlHubAgentId);
-  const isOrchestrating = useOrchestrationStore((s) => s.isOrchestrating);
   const startOrchestration = useOrchestrationStore((s) => s.startOrchestration);
   const continueOrchestration = useOrchestrationStore((s) => s.continueOrchestration);
-  const activeTaskRun = useOrchestrationStore((s) => s.activeTaskRun);
+  const focused = useFocusedTaskRunState();
 
   const isOrchestrationMode = !!controlHubAgentId;
-  const isTaskCompleted = activeTaskRun &&
-    ['completed', 'failed', 'cancelled'].includes(activeTaskRun.status);
+  const focusedTaskRun = focused?.taskRun ?? null;
+  const isFocusedBusy = focusedTaskRun
+    ? ['pending', 'analyzing', 'running'].includes(focusedTaskRun.status)
+    : false;
+  const isTaskCompleted = focusedTaskRun &&
+    ['completed', 'failed', 'cancelled', 'awaiting_confirmation'].includes(focusedTaskRun.status);
   const selectedAgent = agents.find((a) => a.id === selectedAgentId);
   const hubAgent = agents.find((a) => a.id === controlHubAgentId);
 
@@ -32,17 +35,17 @@ export function ChatInput() {
     console.log('[ChatInput] handleSend called:', {
       hasText: !!trimmedText,
       isStreaming,
-      isOrchestrating,
+      isFocusedBusy,
       isOrchestrationMode,
       currentSessionId,
       selectedAgentId
     });
 
-    if (!trimmedText || isStreaming || isOrchestrating) {
+    if (!trimmedText || isStreaming) {
       return;
     }
 
-    // Continue mode: task completed/failed/cancelled, send supplementary instructions
+    // Continue mode: focused task completed/failed/cancelled, send supplementary instructions
     if (isTaskCompleted) {
       console.log('[ChatInput] Continuing orchestration with additional instructions...');
       try {
@@ -56,6 +59,7 @@ export function ChatInput() {
 
     if (isOrchestrationMode) {
       // Orchestration mode: send to Control Hub orchestrator
+      // Allow starting new orchestrations even while others are running
       console.log('[ChatInput] Starting orchestration...');
       try {
         await startOrchestration(trimmedText);
@@ -88,7 +92,7 @@ export function ChatInput() {
     } catch (e) {
       console.error('[ChatInput] Failed to send prompt:', e);
     }
-  }, [text, isStreaming, isOrchestrating, isTaskCompleted, isOrchestrationMode,
+  }, [text, isStreaming, isFocusedBusy, isTaskCompleted, isOrchestrationMode,
       currentSessionId, selectedAgentId, continueOrchestration, startOrchestration,
       ensureSession, sendPrompt]);
 
@@ -103,6 +107,9 @@ export function ChatInput() {
   useEffect(() => {
     textareaRef.current?.focus();
   }, [currentSessionId]);
+
+  // Disable send only when streaming or the focused task is actively busy
+  const sendDisabled = !text.trim() || isStreaming || isFocusedBusy;
 
   return (
     <div className="pb-8 pt-2 px-8 bg-slate-50 dark:bg-[#07070C]">
@@ -168,7 +175,7 @@ export function ChatInput() {
               </span>
               <button
                 onClick={handleSend}
-                disabled={!text.trim() || isStreaming || isOrchestrating}
+                disabled={sendDisabled}
                 className="h-9 px-5 bg-primary hover:bg-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed text-background-dark rounded-lg flex items-center gap-2 font-bold text-xs transition-all shadow-lg shadow-primary/20"
               >
                 {isTaskCompleted ? (

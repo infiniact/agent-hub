@@ -55,6 +55,8 @@ pub struct TaskRun {
     pub next_run_at: Option<String>,
     #[serde(default)]
     pub is_paused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 fn default_schedule_type() -> String {
@@ -107,6 +109,8 @@ pub struct CreateTaskRunRequest {
     pub user_prompt: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// Request to schedule a task for future execution

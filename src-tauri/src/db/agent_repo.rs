@@ -28,19 +28,32 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<AgentConfig> {
         disabled_reason: row.get(19)?,
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
+        workspace_id: row.get(22)?,
     })
 }
 
-const SELECT_COLS: &str = "id, name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, skills_json, acp_command, acp_args_json, is_control_hub, md_file_path, max_concurrency, available_models_json, is_enabled, disabled_reason, created_at, updated_at";
+const SELECT_COLS: &str = "id, name, icon, description, status, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, skills_json, acp_command, acp_args_json, is_control_hub, md_file_path, max_concurrency, available_models_json, is_enabled, disabled_reason, created_at, updated_at, workspace_id";
 
-pub fn list_agents(state: &AppState) -> AppResult<Vec<AgentConfig>> {
+pub fn list_agents(state: &AppState, workspace_id: Option<&str>) -> AppResult<Vec<AgentConfig>> {
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
-    let mut stmt = db
-        .prepare(&format!("SELECT {SELECT_COLS} FROM agents ORDER BY created_at DESC"))
-        .map_err(|e| AppError::Database(e.to_string()))?;
+
+    let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(ws_id) = workspace_id {
+        (
+            format!("SELECT {SELECT_COLS} FROM agents WHERE workspace_id = ?1 ORDER BY created_at DESC"),
+            vec![Box::new(ws_id.to_string())],
+        )
+    } else {
+        (
+            format!("SELECT {SELECT_COLS} FROM agents ORDER BY created_at DESC"),
+            vec![],
+        )
+    };
+
+    let mut stmt = db.prepare(&sql).map_err(|e| AppError::Database(e.to_string()))?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
 
     let agents = stmt
-        .query_map([], |row| row_to_agent(row))
+        .query_map(params_refs.as_slice(), |row| row_to_agent(row))
         .map_err(|e| AppError::Database(e.to_string()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -66,7 +79,7 @@ pub fn create_agent(state: &AppState, req: CreateAgentRequest) -> AppResult<Agen
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
 
     db.execute(
-        "INSERT INTO agents (id, name, icon, description, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, skills_json, acp_command, acp_args_json, is_control_hub, max_concurrency) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO agents (id, name, icon, description, execution_mode, model, temperature, max_tokens, system_prompt, capabilities_json, skills_json, acp_command, acp_args_json, is_control_hub, max_concurrency, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             id,
             req.name,
@@ -83,6 +96,7 @@ pub fn create_agent(state: &AppState, req: CreateAgentRequest) -> AppResult<Agen
             req.acp_args_json,
             req.is_control_hub as i32,
             req.max_concurrency,
+            req.workspace_id,
         ],
     )
     .map_err(|e| AppError::Database(e.to_string()))?;
@@ -142,14 +156,23 @@ pub fn disable_agent(state: &AppState, id: &str, reason: &str) -> AppResult<()> 
 }
 
 pub fn set_control_hub(state: &AppState, id: &str) -> AppResult<AgentConfig> {
-    // Verify agent exists
-    let _ = get_agent(state, id)?;
+    // Verify agent exists and get its workspace_id
+    let agent = get_agent(state, id)?;
 
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
 
-    // Clear all control hub flags first
-    db.execute("UPDATE agents SET is_control_hub = 0", [])
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    // Only clear hub flags for agents in the same workspace
+    match &agent.workspace_id {
+        Some(ws_id) => db.execute(
+            "UPDATE agents SET is_control_hub = 0 WHERE workspace_id = ?1",
+            params![ws_id],
+        ),
+        None => db.execute(
+            "UPDATE agents SET is_control_hub = 0 WHERE workspace_id IS NULL",
+            [],
+        ),
+    }
+    .map_err(|e| AppError::Database(e.to_string()))?;
 
     // Set the specified agent as control hub
     db.execute(
@@ -162,13 +185,20 @@ pub fn set_control_hub(state: &AppState, id: &str) -> AppResult<AgentConfig> {
     get_agent(state, id)
 }
 
-pub fn get_control_hub(state: &AppState) -> AppResult<Option<AgentConfig>> {
+pub fn get_control_hub(state: &AppState, workspace_id: Option<&str>) -> AppResult<Option<AgentConfig>> {
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
-    let result = db.query_row(
-        &format!("SELECT {SELECT_COLS} FROM agents WHERE is_control_hub = 1 LIMIT 1"),
-        [],
-        |row| row_to_agent(row),
-    );
+    let result = match workspace_id {
+        Some(ws_id) => db.query_row(
+            &format!("SELECT {SELECT_COLS} FROM agents WHERE is_control_hub = 1 AND workspace_id = ?1 LIMIT 1"),
+            params![ws_id],
+            |row| row_to_agent(row),
+        ),
+        None => db.query_row(
+            &format!("SELECT {SELECT_COLS} FROM agents WHERE is_control_hub = 1 AND workspace_id IS NULL LIMIT 1"),
+            [],
+            |row| row_to_agent(row),
+        ),
+    };
 
     match result {
         Ok(agent) => Ok(Some(agent)),

@@ -56,8 +56,21 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
   fetchAgents: async () => {
     set({ loading: true });
     try {
-      const agents = await tauriInvoke<AgentConfig[]>('list_agents');
-      const hub = agents.find((a) => a.is_control_hub);
+      // Dynamically import to avoid circular dependency
+      const { useWorkspaceStore } = await import('@/stores/workspaceStore');
+      const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+      const agents = await tauriInvoke<AgentConfig[]>('list_agents', {
+        workspaceId: workspaceId ?? undefined,
+      });
+      // Find control hub only among agents that match the current workspace scope.
+      // When in a workspace, all returned agents belong to it. When in global view,
+      // list_agents returns ALL agents, so we must filter to global-only agents
+      // (workspace_id is null) to avoid picking a workspace-scoped hub that the
+      // backend won't find with a NULL workspace query.
+      const scopedAgents = workspaceId
+        ? agents
+        : agents.filter((a) => !a.workspace_id);
+      const hub = scopedAgents.find((a) => a.is_control_hub);
       set({ agents, controlHubAgentId: hub?.id ?? null });
     } catch (error) {
       console.error('Failed to fetch agents:', error);
@@ -78,6 +91,15 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
     if (id) {
       await chatStore.fetchSessions(id);
       console.log('[AgentStore] Sessions fetched for agent:', id);
+
+      // Auto-select the most recent session (if any) and load its messages
+      const sessions = useChatStore.getState().sessions;
+      if (sessions.length > 0) {
+        const latestSession = sessions[0]; // sorted by updated_at DESC from backend
+        console.log('[AgentStore] Auto-selecting latest session:', latestSession.id);
+        useChatStore.setState({ currentSessionId: latestSession.id });
+        await chatStore.fetchMessages(latestSession.id);
+      }
 
       // Load cached models from DB immediately (before live fetch)
       const agent = get().agents.find((a) => a.id === id);
@@ -171,7 +193,9 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
 
   getControlHub: async () => {
     try {
-      const hub = await tauriInvoke<AgentConfig | null>('get_control_hub');
+      const { useWorkspaceStore } = await import('@/stores/workspaceStore');
+      const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+      const hub = await tauriInvoke<AgentConfig | null>('get_control_hub', { workspaceId });
       set({ controlHubAgentId: hub?.id ?? null });
     } catch (error) {
       console.error('Failed to get control hub:', error);

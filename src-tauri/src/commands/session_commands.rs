@@ -18,11 +18,14 @@ pub async fn create_session(
 pub async fn list_sessions(
     state: tauri::State<'_, AppState>,
     agent_id: String,
+    workspace_id: Option<String>,
 ) -> AppResult<Vec<Session>> {
     let state = state.inner().clone();
-    tokio::task::spawn_blocking(move || session_repo::list_sessions(&state, &agent_id))
-        .await
-        .map_err(|e| crate::error::AppError::Internal(e.to_string()))?
+    tokio::task::spawn_blocking(move || {
+        session_repo::list_sessions(&state, &agent_id, workspace_id.as_deref())
+    })
+    .await
+    .map_err(|e| crate::error::AppError::Internal(e.to_string()))?
 }
 
 #[tauri::command]

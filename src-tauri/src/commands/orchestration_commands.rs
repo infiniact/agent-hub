@@ -12,23 +12,14 @@ pub async fn start_orchestration(
     state: tauri::State<'_, AppState>,
     request: CreateTaskRunRequest,
 ) -> AppResult<TaskRun> {
-    // Guard: reject if an orchestration is already running
-    {
-        let tokens = state.active_task_runs.lock().await;
-        if !tokens.is_empty() {
-            return Err(AppError::InvalidRequest(
-                "An orchestration task is already running. Please wait for it to complete or cancel it before starting a new one.".into()
-            ));
-        }
-    }
-
-    // Verify control hub exists
+    // Verify control hub exists (workspace-scoped)
     let hub: AgentConfig = {
         let state_clone = state.inner().clone();
-        tokio::task::spawn_blocking(move || agent_repo::get_control_hub(&state_clone))
+        let ws_id = request.workspace_id.clone();
+        tokio::task::spawn_blocking(move || agent_repo::get_control_hub(&state_clone, ws_id.as_deref()))
             .await
             .map_err(|e| AppError::Internal(e.to_string()))??
-            .ok_or_else(|| AppError::Internal("No Control Hub agent configured. Set an agent as Control Hub first.".into()))?
+            .ok_or_else(|| AppError::Internal("No Control Hub agent configured for this workspace. Set an agent as Control Hub first.".into()))?
     };
 
     let task_run_id = uuid::Uuid::new_v4().to_string();
@@ -45,8 +36,9 @@ pub async fn start_orchestration(
         let t = title.clone();
         let up = request.user_prompt.clone();
         let hub_id = hub.id.clone();
+        let ws_id = request.workspace_id.clone();
         tokio::task::spawn_blocking(move || {
-            task_run_repo::create_task_run(&state_clone, &trid, &t, &up, &hub_id, "pending")
+            task_run_repo::create_task_run(&state_clone, &trid, &t, &up, &hub_id, "pending", ws_id.as_deref())
         })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))??
@@ -63,8 +55,9 @@ pub async fn start_orchestration(
     let state_clone = state.inner().clone();
     let trid = task_run_id.clone();
     let prompt = request.user_prompt.clone();
+    let ws_id = request.workspace_id.clone();
     tokio::spawn(async move {
-        orchestrator::run_orchestration(app, state_clone, trid, prompt).await;
+        orchestrator::run_orchestration(app, state_clone, trid, prompt, ws_id).await;
     });
 
     Ok(task_run)
@@ -93,9 +86,10 @@ pub async fn cancel_orchestration(
 #[tauri::command]
 pub async fn list_task_runs(
     state: tauri::State<'_, AppState>,
+    workspace_id: Option<String>,
 ) -> AppResult<Vec<TaskRun>> {
     let state = state.inner().clone();
-    tokio::task::spawn_blocking(move || task_run_repo::list_task_runs(&state))
+    tokio::task::spawn_blocking(move || task_run_repo::list_task_runs(&state, workspace_id.as_deref()))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
 }
@@ -107,6 +101,18 @@ pub async fn get_task_run(
 ) -> AppResult<TaskRun> {
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || task_run_repo::get_task_run(&state, &task_run_id))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn update_task_run_status(
+    state: tauri::State<'_, AppState>,
+    task_run_id: String,
+    status: String,
+) -> AppResult<()> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || task_run_repo::update_task_run_status(&state, &task_run_id, &status))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
 }

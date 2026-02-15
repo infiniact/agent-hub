@@ -50,6 +50,13 @@ pub fn run() {
                 *scheduler = Some(scheduler_state);
             });
 
+            // Resume incomplete orchestration tasks from previous session
+            let app_handle2 = app.handle().clone();
+            let state2 = app.state::<AppState>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                acp::orchestrator::resume_incomplete_tasks(app_handle2, state2).await;
+            });
+
             Ok(())
         })
         .manage(app_state)
@@ -94,6 +101,7 @@ pub fn run() {
             commands::orchestration_commands::cancel_agent,
             commands::orchestration_commands::list_task_runs,
             commands::orchestration_commands::get_task_run,
+            commands::orchestration_commands::update_task_run_status,
             commands::orchestration_commands::get_task_assignments,
             commands::orchestration_commands::confirm_orchestration,
             commands::orchestration_commands::regenerate_agent,
@@ -109,6 +117,12 @@ pub fn run() {
             commands::settings_commands::update_settings,
             commands::settings_commands::select_working_directory,
             commands::settings_commands::get_working_directory,
+            // Workspace commands
+            commands::workspace_commands::list_workspaces,
+            commands::workspace_commands::create_workspace,
+            commands::workspace_commands::update_workspace,
+            commands::workspace_commands::delete_workspace,
+            commands::workspace_commands::select_workspace_directory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

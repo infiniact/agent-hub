@@ -142,6 +142,7 @@ pub fn read_agent_md(path: &str) -> AppResult<AgentConfig> {
         available_models_json: None,
         is_enabled,
         disabled_reason: None,
+        workspace_id: None,
         created_at: String::new(),
         updated_at: String::new(),
     })

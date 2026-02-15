@@ -15,12 +15,14 @@ export interface Session {
   acp_session_id: string | null;
   created_at: string;
   updated_at: string;
+  workspace_id: string | null;
 }
 
 export interface CreateSessionRequest {
   agent_id: string;
   title?: string;
   mode?: string;
+  workspace_id?: string;
 }
 
 export interface ContentBlock {

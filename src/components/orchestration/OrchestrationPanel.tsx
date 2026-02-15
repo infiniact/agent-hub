@@ -1,22 +1,24 @@
 "use client";
 
-import { useOrchestrationStore } from "@/stores/orchestrationStore";
+import { useFocusedTaskRunState, useOrchestrationStore, buildTaskContext } from "@/stores/orchestrationStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { AgentTracker } from "./AgentTracker";
 import { TaskPlanView } from "./TaskPlanView";
 import { TrackingSummary } from "./TrackingSummary";
+import { TaskContextEditor } from "./TaskContextEditor";
 import { Codicon } from "@/components/ui/Codicon";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { useState } from "react";
 
 export function OrchestrationPanel() {
-  const activeTaskRun = useOrchestrationStore((s) => s.activeTaskRun);
-  const taskPlan = useOrchestrationStore((s) => s.taskPlan);
-  const agentTracking = useOrchestrationStore((s) => s.agentTracking);
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const rawFocused = useFocusedTaskRunState();
+  // Only show the focused task if it belongs to the active workspace
+  const focused = rawFocused && rawFocused.taskRun.workspace_id === activeWorkspaceId
+    ? rawFocused
+    : null;
   const isOrchestrating = useOrchestrationStore((s) => s.isOrchestrating);
-  const streamingAgentId = useOrchestrationStore((s) => s.streamingAgentId);
   const cancelOrchestration = useOrchestrationStore((s) => s.cancelOrchestration);
-  const isAwaitingConfirmation = useOrchestrationStore((s) => s.isAwaitingConfirmation);
-  const expandedAgentId = useOrchestrationStore((s) => s.expandedAgentId);
   const setExpandedAgentId = useOrchestrationStore((s) => s.setExpandedAgentId);
   const confirmResults = useOrchestrationStore((s) => s.confirmResults);
   const regenerateAgent = useOrchestrationStore((s) => s.regenerateAgent);
@@ -24,15 +26,16 @@ export function OrchestrationPanel() {
   const cancelAgent = useOrchestrationStore((s) => s.cancelAgent);
   const dismissTaskRun = useOrchestrationStore((s) => s.dismissTaskRun);
   const rateTaskRun = useOrchestrationStore((s) => s.rateTaskRun);
-  const planValidation = useOrchestrationStore((s) => s.planValidation);
   const scheduleTask = useOrchestrationStore((s) => s.scheduleTask);
   const clearSchedule = useOrchestrationStore((s) => s.clearSchedule);
   const continueOrchestration = useOrchestrationStore((s) => s.continueOrchestration);
+  const resumeWithEditedContext = useOrchestrationStore((s) => s.resumeWithEditedContext);
 
   const [supplementaryText, setSupplementaryText] = useState("");
   const [isSummarizing, setIsSummarizing] = useState(false);
+  const [showContextEditor, setShowContextEditor] = useState(false);
 
-  if (!activeTaskRun) {
+  if (!focused) {
     return (
       <div className="flex items-center justify-center h-full text-slate-400 dark:text-gray-500">
         <p className="text-sm">No active orchestration</p>
@@ -40,8 +43,10 @@ export function OrchestrationPanel() {
     );
   }
 
-  const status = activeTaskRun.status;
+  const { taskRun, agentTracking, taskPlan, planValidation, streamingAgentId, isAwaitingConfirmation, expandedAgentId } = focused;
+  const status = taskRun.status;
   const isCompleted = status === "completed" || status === "failed" || status === "cancelled";
+  const isTaskRunning = ["pending", "analyzing", "running"].includes(status);
 
   const statusLabel =
     status === "analyzing"
@@ -78,13 +83,13 @@ export function OrchestrationPanel() {
           <div className="flex items-center gap-1">
             <Codicon name="symbol-number" className="text-[10px] text-slate-400" />
             <span className="text-[10px] font-mono text-slate-400 dark:text-gray-600">
-              {activeTaskRun.id.slice(0, 8)}
+              {taskRun.id.slice(0, 8)}
             </span>
           </div>
         </div>
-        {isOrchestrating && (
+        {isTaskRunning && (
           <button
-            onClick={cancelOrchestration}
+            onClick={() => cancelOrchestration(taskRun.id)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
           >
             <Codicon name="error" className="text-[14px]" />
@@ -97,7 +102,7 @@ export function OrchestrationPanel() {
       <div className="px-3 py-2 rounded-lg bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-border-dark/50">
         <p className="text-xs text-slate-500 dark:text-gray-500 font-medium mb-1">Task</p>
         <div className="text-sm text-slate-700 dark:text-gray-300">
-          <MarkdownContent content={activeTaskRun.user_prompt} className="text-sm" />
+          <MarkdownContent content={taskRun.user_prompt} className="text-sm" />
         </div>
       </div>
 
@@ -141,8 +146,8 @@ export function OrchestrationPanel() {
                 setExpandedAgentId(expandedAgentId === info.agentId ? null : info.agentId)
               }
               isAwaitingConfirmation={isAwaitingConfirmation}
-              onRegenerate={() => regenerateAgent(activeTaskRun.id, info.agentId)}
-              onCancel={() => cancelAgent(activeTaskRun.id, info.agentId)}
+              onRegenerate={() => regenerateAgent(taskRun.id, info.agentId)}
+              onCancel={() => cancelAgent(taskRun.id, info.agentId)}
             />
           ))}
         </div>
@@ -170,7 +175,7 @@ export function OrchestrationPanel() {
             <button
               onClick={() => {
                 setIsSummarizing(true);
-                confirmResults(activeTaskRun.id);
+                confirmResults(taskRun.id);
               }}
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium bg-primary text-white hover:bg-primary/90 transition-colors"
             >
@@ -191,7 +196,7 @@ export function OrchestrationPanel() {
               </button>
             )}
             <button
-              onClick={() => regenerateAll(activeTaskRun.id)}
+              onClick={() => regenerateAll(taskRun.id)}
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors"
             >
               <Codicon name="refresh" className="text-[14px]" />
@@ -213,14 +218,32 @@ export function OrchestrationPanel() {
 
       {/* Completion summary */}
       {isCompleted && (
-        <TrackingSummary
-          taskRun={activeTaskRun}
-          agentTracking={agentTracking}
-          onRateTask={rateTaskRun}
-          onRateComplete={dismissTaskRun}
-          onScheduleTask={scheduleTask}
-          onClearSchedule={clearSchedule}
-        />
+        <>
+          <TrackingSummary
+            taskRun={taskRun}
+            agentTracking={agentTracking}
+            onRateTask={rateTaskRun}
+            onRateComplete={() => dismissTaskRun(taskRun.id)}
+            onScheduleTask={scheduleTask}
+            onClearSchedule={clearSchedule}
+          />
+          <button
+            onClick={() => setShowContextEditor(true)}
+            className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors self-start"
+          >
+            <Codicon name="edit" className="text-[14px]" />
+            Edit Context & Resume
+          </button>
+          <TaskContextEditor
+            open={showContextEditor}
+            onClose={() => setShowContextEditor(false)}
+            taskRunId={taskRun.id}
+            initialContext={buildTaskContext(taskRun, agentTracking)}
+            taskTitle={taskRun.title || taskRun.user_prompt.slice(0, 60)}
+            onResume={(id, ctx) => resumeWithEditedContext(id, ctx)}
+            onDismiss={(id) => dismissTaskRun(id)}
+          />
+        </>
       )}
     </div>
   );

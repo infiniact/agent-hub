@@ -26,6 +26,7 @@ fn row_to_task_run(row: &rusqlite::Row) -> rusqlite::Result<TaskRun> {
         recurrence_pattern_json: row.get(17)?,
         next_run_at: row.get(18)?,
         is_paused: row.get::<_, i32>(19)? != 0,
+        workspace_id: row.get(20)?,
     })
 }
 
@@ -52,7 +53,7 @@ fn row_to_assignment(row: &rusqlite::Row) -> rusqlite::Result<TaskAssignment> {
     })
 }
 
-const TASK_RUN_COLS: &str = "id, title, user_prompt, control_hub_agent_id, status, task_plan_json, result_summary, total_tokens_in, total_tokens_out, total_cache_creation_tokens, total_cache_read_tokens, total_duration_ms, created_at, updated_at, rating, schedule_type, scheduled_time, recurrence_pattern, next_run_at, is_paused";
+const TASK_RUN_COLS: &str = "id, title, user_prompt, control_hub_agent_id, status, task_plan_json, result_summary, total_tokens_in, total_tokens_out, total_cache_creation_tokens, total_cache_read_tokens, total_duration_ms, created_at, updated_at, rating, schedule_type, scheduled_time, recurrence_pattern, next_run_at, is_paused, workspace_id";
 const ASSIGNMENT_COLS: &str = "id, task_run_id, agent_id, agent_name, sequence_order, input_text, output_text, status, model_used, tokens_in, tokens_out, cache_creation_tokens, cache_read_tokens, started_at, completed_at, duration_ms, error_message, created_at";
 
 pub fn create_task_run(
@@ -62,11 +63,12 @@ pub fn create_task_run(
     user_prompt: &str,
     control_hub_agent_id: &str,
     status: &str,
+    workspace_id: Option<&str>,
 ) -> AppResult<TaskRun> {
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
     db.execute(
-        "INSERT INTO task_runs (id, title, user_prompt, control_hub_agent_id, status) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, title, user_prompt, control_hub_agent_id, status],
+        "INSERT INTO task_runs (id, title, user_prompt, control_hub_agent_id, status, workspace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, title, user_prompt, control_hub_agent_id, status, workspace_id],
     )
     .map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -166,14 +168,26 @@ pub fn get_task_run(state: &AppState, id: &str) -> AppResult<TaskRun> {
     })
 }
 
-pub fn list_task_runs(state: &AppState) -> AppResult<Vec<TaskRun>> {
+pub fn list_task_runs(state: &AppState, workspace_id: Option<&str>) -> AppResult<Vec<TaskRun>> {
     let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
-    let mut stmt = db
-        .prepare(&format!("SELECT {TASK_RUN_COLS} FROM task_runs ORDER BY created_at DESC"))
-        .map_err(|e| AppError::Database(e.to_string()))?;
+
+    let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(ws_id) = workspace_id {
+        (
+            format!("SELECT {TASK_RUN_COLS} FROM task_runs WHERE workspace_id = ?1 ORDER BY created_at DESC"),
+            vec![Box::new(ws_id.to_string())],
+        )
+    } else {
+        (
+            format!("SELECT {TASK_RUN_COLS} FROM task_runs ORDER BY created_at DESC"),
+            vec![],
+        )
+    };
+
+    let mut stmt = db.prepare(&sql).map_err(|e| AppError::Database(e.to_string()))?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
 
     let runs = stmt
-        .query_map([], |row| row_to_task_run(row))
+        .query_map(params_refs.as_slice(), |row| row_to_task_run(row))
         .map_err(|e| AppError::Database(e.to_string()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -258,6 +272,27 @@ pub fn list_assignments_for_run(state: &AppState, task_run_id: &str) -> AppResul
         .map_err(|e| AppError::Database(e.to_string()))?;
 
     Ok(assignments)
+}
+
+/// List all task runs that are in non-terminal states (pending, analyzing, running, awaiting_confirmation).
+/// Used on startup to find orphaned tasks that need to be resumed.
+pub fn list_incomplete_task_runs(state: &AppState) -> AppResult<Vec<TaskRun>> {
+    let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
+    let mut stmt = db
+        .prepare(&format!(
+            "SELECT {TASK_RUN_COLS} FROM task_runs \
+             WHERE status IN ('pending', 'analyzing', 'running', 'awaiting_confirmation') \
+             ORDER BY created_at ASC"
+        ))
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+    let runs = stmt
+        .query_map([], |row| row_to_task_run(row))
+        .map_err(|e| AppError::Database(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+    Ok(runs)
 }
 
 // ============== Scheduling functions ==============

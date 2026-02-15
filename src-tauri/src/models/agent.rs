@@ -49,6 +49,8 @@ pub struct AgentConfig {
     pub disabled_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +80,8 @@ pub struct CreateAgentRequest {
     pub is_control_hub: bool,
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: i64,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { AgentTrackingInfo } from "@/types/orchestration";
+import type { AgentTrackingInfo, A2aCallInfo } from "@/types/orchestration";
 import { Codicon } from "@/components/ui/Codicon";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { GeneratedFileBlock } from "@/components/chat/GeneratedFileBlock";
@@ -132,6 +132,15 @@ export function AgentTracker({
         </div>
       )}
 
+      {/* A2A calls preview (when not expanded but has A2A calls) */}
+      {!isExpanded && info.a2aCalls && info.a2aCalls.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {info.a2aCalls.map((call, idx) => (
+            <A2aCallRow key={`${call.targetAgentId}-${call.iteration}`} call={call} />
+          ))}
+        </div>
+      )}
+
       {/* Completed output preview (when not expanded and agent finished) */}
       {!isExpanded && !isStreaming && info.status !== 'running' && (info.output || info.streamedContent) && (
         <div className="mt-2 max-h-24 overflow-y-auto rounded bg-slate-50 dark:bg-black/20 px-3 py-2 text-xs text-slate-600 dark:text-gray-400">
@@ -151,6 +160,20 @@ export function AgentTracker({
               <div className="space-y-1">
                 {info.toolCalls.map((tc) => (
                   <ToolCallRow key={tc.toolCallId} toolCall={tc} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* A2A calls */}
+          {info.a2aCalls && info.a2aCalls.length > 0 && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-gray-500 mb-1.5">
+                A2A Calls
+              </p>
+              <div className="space-y-1">
+                {info.a2aCalls.map((call, idx) => (
+                  <A2aCallRow key={`${call.targetAgentId}-${call.iteration}`} call={call} />
                 ))}
               </div>
             </div>
@@ -243,6 +266,41 @@ function ToolCallRow({ toolCall }: { toolCall: NonNullable<AgentTrackingInfo["to
               {typeof toolCall.rawOutput === "string"
                 ? toolCall.rawOutput
                 : JSON.stringify(toolCall.rawOutput, null, 2)}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function A2aCallRow({ call }: { call: A2aCallInfo }) {
+  const [showDetail, setShowDetail] = useState(false);
+  const hasResult = call.result !== undefined;
+  const statusColor = hasResult ? "text-emerald-400" : "text-blue-400";
+
+  return (
+    <div className="rounded bg-slate-50 dark:bg-black/10 px-2 py-1.5">
+      <button
+        onClick={() => setShowDetail(!showDetail)}
+        className="flex items-center gap-2 w-full text-left"
+      >
+        <Codicon name="call-outgoing" className={`text-[12px] ${statusColor}`} />
+        <span className="text-[11px] font-medium text-slate-700 dark:text-gray-300 truncate flex-1">
+          A2A → {call.targetAgentName || call.targetAgentId}
+        </span>
+        <span className={`text-[10px] ${statusColor}`}>
+          {hasResult ? "completed" : "calling..."}
+        </span>
+      </button>
+      {showDetail && (
+        <div className="mt-1.5 space-y-1">
+          <pre className="text-[10px] text-slate-500 dark:text-gray-500 bg-white dark:bg-slate-900/50 rounded px-2 py-1 overflow-x-auto max-h-32 whitespace-pre-wrap">
+            {call.prompt}
+          </pre>
+          {call.result && (
+            <pre className="text-[10px] text-slate-500 dark:text-gray-500 bg-white dark:bg-slate-900/50 rounded px-2 py-1 overflow-x-auto max-h-32 whitespace-pre-wrap">
+              {call.result}
             </pre>
           )}
         </div>

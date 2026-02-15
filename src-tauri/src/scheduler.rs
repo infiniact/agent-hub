@@ -108,7 +108,8 @@ async fn check_and_execute_scheduled_tasks(app: &AppHandle, state: &AppState) ->
             }
 
             // Run orchestration
-            orchestrator::run_orchestration(app_clone, state_clone.clone(), task_id, task_clone.user_prompt).await;
+            let ws_id = task_clone.workspace_id.clone();
+            orchestrator::run_orchestration(app_clone, state_clone.clone(), task_id, task_clone.user_prompt, ws_id).await;
 
             // After completion, update next_run_at for recurring tasks
             let state = state_clone.clone();

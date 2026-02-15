@@ -76,6 +76,18 @@
   color: #00838f;
 }
 
+/* Workspace icon breathing glow when orchestrating */
+@keyframes workspace-breathing {
+  0%, 100% { box-shadow: 0 0 4px rgba(0,229,255,0.2); }
+  50% { box-shadow: 0 0 12px rgba(0,229,255,0.5); }
+}
+
+/* Toast slide-in animation */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(100%); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
 /* Selection */
 ::selection {
   background-color: rgba(0, 229, 255, 0.3);

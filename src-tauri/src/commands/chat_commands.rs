@@ -3,6 +3,7 @@ use tauri::Emitter;
 use crate::db::agent_repo;
 use crate::db::message_repo;
 use crate::db::session_repo;
+use crate::db::workspace_repo;
 use crate::commands::settings_commands;
 use crate::error::{AppError, AppResult};
 use crate::models::agent::AgentConfig;
@@ -287,31 +288,39 @@ async fn handle_agent_responses(
 ) {
     log::info!("handle_agent_responses started: agent_id={}, session_id={}", agent_id, session_id);
 
+    let timeout_deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+
     loop {
-        let msg = {
+        // Non-blocking receive: lock the HashMap briefly, try_recv, release immediately.
+        // This prevents blocking other agents (including orchestrator) from accessing the HashMap.
+        let recv_result = {
             let mut processes = state.agent_processes.lock().await;
-            if let Some(process) = processes.get_mut(&agent_id) {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(300),
-                    crate::acp::transport::receive_message(process),
-                )
-                .await
-                {
-                    Ok(Ok(msg)) => {
-                        log::debug!("Received message from agent: {}", serde_json::to_string(&msg).unwrap_or_else(|_| "unknown".into()));
-                        Some(msg)
-                    }
-                    Ok(Err(e)) => {
-                        log::error!("Error receiving message: {}", e);
-                        None
-                    }
-                    Err(_) => {
-                        log::warn!("Timeout receiving message from agent");
-                        None
-                    }
+            match processes.get_mut(&agent_id) {
+                Some(process) => process.message_rx.try_recv(),
+                None => {
+                    log::warn!("Agent process not found: {}", agent_id);
+                    break;
                 }
-            } else {
-                log::warn!("Agent process not found: {}", agent_id);
+            }
+        };
+        // HashMap lock is released here
+
+        let msg = match recv_result {
+            Ok(msg) => {
+                log::debug!("Received message from agent: {}", serde_json::to_string(&msg).unwrap_or_else(|_| "unknown".into()));
+                Some(msg)
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                // No message yet — check timeout, then yield
+                if std::time::Instant::now() >= timeout_deadline {
+                    log::warn!("Timeout waiting for messages from agent {}", agent_id);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                log::warn!("Agent {} message channel disconnected", agent_id);
                 None
             }
         };
@@ -506,8 +515,24 @@ pub async fn save_generated_file(
     state: tauri::State<'_, AppState>,
     path: String,
     content: String,
+    workspace_id: Option<String>,
 ) -> AppResult<()> {
-    let trusted_dir = settings_commands::resolve_working_directory(&state);
+    // Resolve working directory: prefer workspace's directory, fallback to global setting
+    let trusted_dir = if let Some(ws_id) = workspace_id {
+        let state_clone = state.inner().clone();
+        let ws = tokio::task::spawn_blocking(move || {
+            workspace_repo::get_workspace(&state_clone, &ws_id)
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+        if ws.working_directory.is_empty() {
+            settings_commands::resolve_working_directory(&state)
+        } else {
+            ws.working_directory
+        }
+    } else {
+        settings_commands::resolve_working_directory(&state)
+    };
     if !crate::acp::filesystem::is_path_allowed(&path, Some(&trusted_dir)) {
         return Err(AppError::PermissionDenied(
             "Access denied: path is outside the trusted working directory".into(),
@@ -583,7 +608,16 @@ async fn create_new_acp_session(
     let process = processes.get_mut(agent_id)
         .ok_or_else(|| AppError::Internal(format!("Agent {} process not found", agent_id)))?;
 
-    let cwd = settings_commands::resolve_working_directory(state);
+    // Resolve working directory: prefer workspace's directory, fallback to global setting
+    let cwd = {
+        let session = session_repo::get_session(state, session_id);
+        let ws_dir = session.ok().and_then(|s| s.workspace_id).and_then(|ws_id| {
+            workspace_repo::get_workspace(state, &ws_id).ok()
+        }).and_then(|ws| {
+            if ws.working_directory.is_empty() { None } else { Some(ws.working_directory) }
+        });
+        ws_dir.unwrap_or_else(|| settings_commands::resolve_working_directory(state))
+    };
 
     log::info!("Calling create_session for agent {}", agent_id);
     let (acp_id, models) = crate::acp::client::create_session(process, &cwd).await?;

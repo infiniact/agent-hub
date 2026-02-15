@@ -1,9 +1,10 @@
 "use client";
 
-import { useOrchestrationStore } from "@/stores/orchestrationStore";
+import { useOrchestrationStore, buildTaskContext } from "@/stores/orchestrationStore";
 import { AgentTracker } from "./AgentTracker";
 import { TaskPlanView } from "./TaskPlanView";
 import { TrackingSummary } from "./TrackingSummary";
+import { TaskContextEditor } from "./TaskContextEditor";
 import { Codicon } from "@/components/ui/Codicon";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { useState } from "react";
@@ -21,9 +22,12 @@ export function TaskHistoryPanel() {
   const scheduleTask = useOrchestrationStore((s) => s.scheduleTask);
   const clearSchedule = useOrchestrationStore((s) => s.clearSchedule);
   const startOrchestration = useOrchestrationStore((s) => s.startOrchestration);
+  const resumeWithEditedContext = useOrchestrationStore((s) => s.resumeWithEditedContext);
+  const dismissTaskRun = useOrchestrationStore((s) => s.dismissTaskRun);
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [restartText, setRestartText] = useState("");
   const [isRestarting, setIsRestarting] = useState(false);
+  const [showContextEditor, setShowContextEditor] = useState(false);
 
   if (!viewingTaskRun) {
     return (
@@ -171,7 +175,29 @@ export function TaskHistoryPanel() {
               <Codicon name="debug-restart" className="text-[14px]" />
               {isRestarting ? "Starting..." : "Restart"}
             </button>
+            <button
+              onClick={() => setShowContextEditor(true)}
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors"
+            >
+              <Codicon name="edit" className="text-[14px]" />
+              Edit Context & Resume
+            </button>
           </div>
+          <TaskContextEditor
+            open={showContextEditor}
+            onClose={() => setShowContextEditor(false)}
+            taskRunId={viewingTaskRun.id}
+            initialContext={buildTaskContext(viewingTaskRun, viewingAgentTracking)}
+            taskTitle={viewingTaskRun.title || viewingTaskRun.user_prompt.slice(0, 60)}
+            onResume={(id, ctx) => {
+              clearViewingTaskRun();
+              resumeWithEditedContext(id, ctx);
+            }}
+            onDismiss={(id) => {
+              clearViewingTaskRun();
+              dismissTaskRun(id);
+            }}
+          />
         </div>
       )}
     </div>

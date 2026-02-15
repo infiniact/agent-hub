@@ -3,6 +3,7 @@
 import { useAgentStore } from "@/stores/agentStore";
 import { useAcpStore } from "@/stores/acpStore";
 import { useOrchestrationStore } from "@/stores/orchestrationStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { Codicon } from "@/components/ui/Codicon";
 import { McpIcon } from "@/components/icons/McpIcon";
 import { cn } from "@/lib/cn";
@@ -35,6 +36,13 @@ export function NavBar() {
   const setShowKanban = useAgentStore((s) => s.setShowKanban);
   const discoveredAgents = useAcpStore((s) => s.discoveredAgents);
   const scanForAgents = useAcpStore((s) => s.scanForAgents);
+
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const selectWorkspaceDirectory = useWorkspaceStore((s) => s.selectWorkspaceDirectory);
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
+  const workingDirectory = activeWorkspace?.working_directory || '';
+  const folderName = workingDirectory ? workingDirectory.split('/').pop() : null;
 
   // Get task runs to show status dots for agents with scheduled/running tasks
   const taskRuns = useOrchestrationStore((s) => s.taskRuns);
@@ -73,12 +81,12 @@ export function NavBar() {
     return dotsMap;
   }, [taskRuns]);
 
-  // Fetch task runs on mount
+  // Fetch task runs on mount and when workspace changes
   useEffect(() => {
-    if (isTauri()) {
+    if (isTauri() && activeWorkspaceId) {
       fetchTaskRuns();
     }
-  }, [fetchTaskRuns]);
+  }, [fetchTaskRuns, activeWorkspaceId]);
 
   useEffect(() => {
     if (!isTauri() || initialized) return;
@@ -128,6 +136,7 @@ export function NavBar() {
         if (currentAgents.length === 0 && availableAgents.length > 0) {
           const discovered = bestDiscovered!;
           console.log('[NavBar] Creating agent from discovered:', discovered.name);
+          const wsId = useWorkspaceStore.getState().activeWorkspaceId;
 
           createAgent({
             name: discovered.name,
@@ -141,6 +150,7 @@ export function NavBar() {
             capabilities_json: '[]',
             acp_command: discovered.command,
             acp_args_json: discovered.args_json,
+            workspace_id: wsId ?? undefined,
           }).then((defaultAgent) => {
             console.log('[NavBar] Agent created from discovered:', defaultAgent.id);
             selectAgent(defaultAgent.id);
@@ -150,6 +160,7 @@ export function NavBar() {
         } else if (currentAgents.length === 0) {
           // No agents at all, create a default one (will need manual configuration)
           console.log('[NavBar] No agents found, creating default agent...');
+          const wsId = useWorkspaceStore.getState().activeWorkspaceId;
           createAgent({
             name: 'Default Agent',
             icon: 'code',
@@ -162,6 +173,7 @@ export function NavBar() {
             capabilities_json: '[]',
             acp_command: undefined,
             acp_args_json: undefined,
+            workspace_id: wsId ?? undefined,
           }).then((defaultAgent) => {
             console.log('[NavBar] Default agent created:', defaultAgent.id);
             selectAgent(defaultAgent.id);
@@ -196,14 +208,33 @@ export function NavBar() {
 
   return (
     <div className="h-12 shrink-0 bg-white dark:bg-[#07070C] border-b border-slate-200 dark:border-border-dark flex items-center px-4 justify-between">
-      {/* Left: Session management */}
-      <div className="flex items-center">
+      {/* Left: Session management + workspace directory */}
+      <div className="flex items-center gap-2">
         <button
           className="size-8 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 flex items-center justify-center text-slate-400 dark:text-gray-500 hover:text-primary transition-colors"
           title="Sessions"
         >
           <Codicon name="comment-discussion" />
         </button>
+        {/* Workspace directory */}
+        {activeWorkspace && (
+          <>
+            <div className="w-px h-5 bg-slate-200 dark:bg-border-dark/60" />
+            <button
+              className="flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 text-slate-400 dark:text-gray-500 hover:text-primary transition-colors text-xs"
+              onClick={() => activeWorkspaceId && selectWorkspaceDirectory(activeWorkspaceId)}
+              title={workingDirectory ? `Workspace: ${workingDirectory}` : "Select workspace folder"}
+            >
+              <Codicon name="folder-opened" className="text-[14px] leading-none" />
+              {folderName && (
+                <span className="max-w-[120px] truncate">{folderName}</span>
+              )}
+              {!workingDirectory && (
+                <div className="size-2 rounded-full bg-amber-500 shadow-[0_0_4px_rgba(245,158,11,0.4)]" />
+              )}
+            </button>
+          </>
+        )}
       </div>
 
       {/* Center: Agent tabs */}
@@ -330,7 +361,9 @@ export function NavBar() {
                 capabilities_json: '[]',
                 acp_command: best?.command,
                 acp_args_json: best?.args_json,
+                workspace_id: activeWorkspaceId ?? undefined,
               });
+
               await selectAgent(newAgent.id);
             } catch (e) {
               console.error('[NavBar] Failed to add agent:', e);

@@ -49,6 +49,7 @@ export interface AgentConfig {
   available_models_json: string | null;
   is_enabled: boolean;
   disabled_reason: string | null;
+  workspace_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -68,6 +69,7 @@ export interface CreateAgentRequest {
   acp_args_json?: string;
   is_control_hub?: boolean;
   max_concurrency?: number;
+  workspace_id?: string;
 }
 
 export interface UpdateAgentRequest {

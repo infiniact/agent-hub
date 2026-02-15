@@ -5,3 +5,4 @@ pub mod migrations;
 pub mod session_repo;
 pub mod settings_repo;
 pub mod task_run_repo;
+pub mod workspace_repo;

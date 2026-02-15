@@ -4,10 +4,13 @@ use crate::models::agent::{AgentConfig, CreateAgentRequest, UpdateAgentRequest};
 use crate::state::AppState;
 use crate::acp::{client, discovery, manager, provisioner};
 
-#[tauri::command]
-pub async fn list_agents(state: tauri::State<'_, AppState>) -> AppResult<Vec<AgentConfig>> {
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_agents(
+    state: tauri::State<'_, AppState>,
+    workspace_id: Option<String>,
+) -> AppResult<Vec<AgentConfig>> {
     let state = state.inner().clone();
-    tokio::task::spawn_blocking(move || agent_repo::list_agents(&state))
+    tokio::task::spawn_blocking(move || agent_repo::list_agents(&state, workspace_id.as_deref()))
         .await
         .map_err(|e| crate::error::AppError::Internal(e.to_string()))?
 }
@@ -34,7 +37,7 @@ pub async fn create_agent(
             let _ = agent_repo::update_agent_md_path(&state, &agent.id, &path_str);
         }
         // Regenerate agents registry
-        if let Ok(all_agents) = agent_repo::list_agents(&state) {
+        if let Ok(all_agents) = agent_repo::list_agents(&state, None) {
             let _ = agent_md::write_agents_registry(&all_agents);
         }
         agent_repo::get_agent(&state, &agent.id)
@@ -58,7 +61,7 @@ pub async fn update_agent(
             let _ = agent_repo::update_agent_md_path(&state, &agent.id, &path_str);
         }
         // Regenerate agents registry
-        if let Ok(all_agents) = agent_repo::list_agents(&state) {
+        if let Ok(all_agents) = agent_repo::list_agents(&state, None) {
             let _ = agent_md::write_agents_registry(&all_agents);
         }
         agent_repo::get_agent(&state, &agent.id)
@@ -74,7 +77,7 @@ pub async fn delete_agent(state: tauri::State<'_, AppState>, id: String) -> AppR
         agent_md::delete_agent_md(&id);
         agent_repo::delete_agent(&state, &id)?;
         // Regenerate agents registry
-        if let Ok(all_agents) = agent_repo::list_agents(&state) {
+        if let Ok(all_agents) = agent_repo::list_agents(&state, None) {
             let _ = agent_md::write_agents_registry(&all_agents);
         }
         Ok(())
@@ -94,12 +97,13 @@ pub async fn set_control_hub(
         .map_err(|e| crate::error::AppError::Internal(e.to_string()))?
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn get_control_hub(
     state: tauri::State<'_, AppState>,
+    workspace_id: Option<String>,
 ) -> AppResult<Option<AgentConfig>> {
     let state = state.inner().clone();
-    tokio::task::spawn_blocking(move || agent_repo::get_control_hub(&state))
+    tokio::task::spawn_blocking(move || agent_repo::get_control_hub(&state, workspace_id.as_deref()))
         .await
         .map_err(|e| crate::error::AppError::Internal(e.to_string()))?
 }
@@ -145,7 +149,7 @@ pub async fn enable_agent(
             let aid = agent_id.clone();
             let updated = tokio::task::spawn_blocking(move || {
                 let agent = agent_repo::get_agent(&state_clone, &aid)?;
-                if let Ok(all) = agent_repo::list_agents(&state_clone) {
+                if let Ok(all) = agent_repo::list_agents(&state_clone, None) {
                     let _ = agent_md::write_agents_registry(&all);
                 }
                 Ok::<AgentConfig, AppError>(agent)
@@ -192,7 +196,7 @@ pub async fn enable_agent(
                     let path_str = md_path.to_string_lossy().to_string();
                     let _ = agent_repo::update_agent_md_path(&state_clone, &agent.id, &path_str);
                 }
-                if let Ok(all) = agent_repo::list_agents(&state_clone) {
+                if let Ok(all) = agent_repo::list_agents(&state_clone, None) {
                     let _ = agent_md::write_agents_registry(&all);
                 }
                 agent_repo::get_agent(&state_clone, &aid)
