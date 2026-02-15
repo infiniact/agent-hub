@@ -4,6 +4,7 @@ import { useAgentStore } from "@/stores/agentStore";
 import { useAcpStore } from "@/stores/acpStore";
 import { useOrchestrationStore } from "@/stores/orchestrationStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
+import { useChatToolStore } from "@/stores/chatToolStore";
 import { Codicon } from "@/components/ui/Codicon";
 import { McpIcon } from "@/components/icons/McpIcon";
 import { cn } from "@/lib/cn";
@@ -34,6 +35,8 @@ export function NavBar() {
   const controlHubAgentId = useAgentStore((s) => s.controlHubAgentId);
   const showKanban = useAgentStore((s) => s.showKanban);
   const setShowKanban = useAgentStore((s) => s.setShowKanban);
+  const showChatTools = useAgentStore((s) => s.showChatTools);
+  const setShowChatTools = useAgentStore((s) => s.setShowChatTools);
   const discoveredAgents = useAcpStore((s) => s.discoveredAgents);
   const scanForAgents = useAcpStore((s) => s.scanForAgents);
 
@@ -43,6 +46,23 @@ export function NavBar() {
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
   const workingDirectory = activeWorkspace?.working_directory || '';
   const folderName = workingDirectory ? workingDirectory.split('/').pop() : null;
+
+  // Chat tool status dots
+  const chatTools = useChatToolStore((s) => s.chatTools);
+  const chatToolStatusDots = useMemo(() => {
+    const dots: Array<'running' | 'error' | 'login_required'> = [];
+    for (const tool of chatTools) {
+      if (dots.length >= 5) break;
+      if (tool.status === 'running') {
+        dots.push('running');
+      } else if (tool.status === 'error') {
+        dots.push('error');
+      } else if (tool.status === 'login_required') {
+        dots.push('login_required');
+      }
+    }
+    return dots;
+  }, [chatTools]);
 
   // Get task runs to show status dots for agents with scheduled/running tasks
   const taskRuns = useOrchestrationStore((s) => s.taskRuns);
@@ -256,6 +276,39 @@ export function NavBar() {
         >
           <Codicon name="kanban" className="text-[20px]" />
         </button>
+        {/* Chat Tools button */}
+        <div className="relative">
+          <button
+            onClick={() => {
+              setShowChatTools(true);
+              selectAgent(null as any);
+            }}
+            className={cn(
+              "size-8 rounded-lg flex items-center justify-center transition-all",
+              showChatTools
+                ? "bg-primary text-background-dark shadow-[0_0_10px_rgba(0,229,255,0.3)]"
+                : "bg-white dark:bg-surface-dark border border-slate-200 dark:border-white/5 hover:border-primary/50 text-slate-400 dark:text-gray-400 hover:text-primary"
+            )}
+            title="Chat"
+          >
+            <Codicon name="comment-discussion" className="text-[20px]" />
+          </button>
+          {chatToolStatusDots.length > 0 && (
+            <div className="absolute -top-1 left-1/2 -translate-x-1/2 flex gap-[2px]">
+              {chatToolStatusDots.map((status, i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    "size-[5px] rounded-full",
+                    status === "running" && "bg-emerald-500",
+                    status === "error" && "bg-rose-500 animate-pulse",
+                    status === "login_required" && "bg-amber-400 animate-pulse"
+                  )}
+                />
+              ))}
+            </div>
+          )}
+        </div>
         <div className="w-px h-5 bg-slate-200 dark:border-border-dark/60 mx-1" />
         {agents.map((agent) => {
           const dots = agentTaskDots[agent.id] || [];
@@ -267,6 +320,7 @@ export function NavBar() {
               onClick={() => {
                 selectAgent(agent.id);
                 setShowKanban(false);
+                setShowChatTools(false);
                 clearViewingTaskRun();
               }}
               onContextMenu={(e) => handleContextMenu(e, agent.id)}

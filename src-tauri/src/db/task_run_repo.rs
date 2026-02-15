@@ -122,6 +122,20 @@ pub fn update_task_run_summary(
     Ok(())
 }
 
+pub fn update_task_run_prompt(
+    state: &AppState,
+    id: &str,
+    user_prompt: &str,
+) -> AppResult<()> {
+    let db = state.db.lock().map_err(|e| AppError::Database(e.to_string()))?;
+    db.execute(
+        "UPDATE task_runs SET user_prompt = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![user_prompt, id],
+    )
+    .map_err(|e| AppError::Database(e.to_string()))?;
+    Ok(())
+}
+
 /// Rate a completed task run (1-5 stars)
 pub fn rate_task_run(
     state: &AppState,

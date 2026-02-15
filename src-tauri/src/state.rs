@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::io::BufWriter;
@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use serde::{Deserialize, Serialize};
 
 use crate::acp::manager::AgentProcess;
+use crate::chat_tool::manager::ChatToolProcess;
 use crate::scheduler::SchedulerState;
 
 /// Action the user can take when orchestration awaits confirmation
@@ -132,6 +133,18 @@ pub struct AppState {
     pub scheduler: Arc<Mutex<Option<SchedulerState>>>,
     /// Cached skill discovery result from workspace scanning
     pub discovered_skills: Arc<Mutex<Option<crate::acp::skill_discovery::SkillDiscoveryResult>>>,
+    /// Running chat tool bridge processes keyed by chat_tool_id
+    pub chat_tool_processes: Arc<Mutex<HashMap<String, ChatToolProcess>>>,
+    /// Cancellation tokens for chat tool bridge event loops
+    pub chat_tool_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// Cached QR code images for chat tool login (chat_tool_id -> base64 image)
+    pub chat_tool_qr_codes: Arc<Mutex<HashMap<String, String>>>,
+    /// Persistent ACP session IDs for chat tools (chat_tool_id -> acp_session_id)
+    pub chat_tool_acp_sessions: Arc<Mutex<HashMap<String, String>>>,
+    /// Task run IDs for chat tool message processing (chat_tool_id -> task_run_id)
+    pub chat_tool_task_runs: Arc<Mutex<HashMap<String, String>>>,
+    /// Set of chat_tool_ids currently processing a message (used for busy-reply)
+    pub chat_tool_processing: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AppState {
@@ -148,6 +161,12 @@ impl AppState {
             pending_orch_permissions: Arc::new(Mutex::new(HashMap::new())),
             scheduler: Arc::new(Mutex::new(None)),
             discovered_skills: Arc::new(Mutex::new(None)),
+            chat_tool_processes: Arc::new(Mutex::new(HashMap::new())),
+            chat_tool_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            chat_tool_qr_codes: Arc::new(Mutex::new(HashMap::new())),
+            chat_tool_acp_sessions: Arc::new(Mutex::new(HashMap::new())),
+            chat_tool_task_runs: Arc::new(Mutex::new(HashMap::new())),
+            chat_tool_processing: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -167,6 +186,12 @@ impl Clone for AppState {
             pending_orch_permissions: Arc::clone(&self.pending_orch_permissions),
             scheduler: Arc::clone(&self.scheduler),
             discovered_skills: Arc::clone(&self.discovered_skills),
+            chat_tool_processes: Arc::clone(&self.chat_tool_processes),
+            chat_tool_cancellations: Arc::clone(&self.chat_tool_cancellations),
+            chat_tool_qr_codes: Arc::clone(&self.chat_tool_qr_codes),
+            chat_tool_acp_sessions: Arc::clone(&self.chat_tool_acp_sessions),
+            chat_tool_task_runs: Arc::clone(&self.chat_tool_task_runs),
+            chat_tool_processing: Arc::clone(&self.chat_tool_processing),
         }
     }
 }

@@ -51,3 +51,4 @@ src-tauri/gen/
 .vscode/
 *.swp
 *.swo
+bridges/wechat/node_modules

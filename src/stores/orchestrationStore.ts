@@ -1187,6 +1187,16 @@ export function initializeOrchestrationListeners() {
     });
   }).then((unlisten) => orchestrationUnlistenFns.push(unlisten));
 
+  // orchestration:task_run_created — emitted by chat tool bridge when a new TaskRun is created
+  tauriListen<any>('orchestration:task_run_created', () => {
+    useOrchestrationStore.getState().fetchTaskRuns();
+  }).then((unlisten) => orchestrationUnlistenFns.push(unlisten));
+
+  // orchestration:task_run_updated — emitted by chat tool bridge when a TaskRun status changes
+  tauriListen<any>('orchestration:task_run_updated', () => {
+    useOrchestrationStore.getState().fetchTaskRuns();
+  }).then((unlisten) => orchestrationUnlistenFns.push(unlisten));
+
   console.log('[Orchestration] Event listeners initialized');
 }
 

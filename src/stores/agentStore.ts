@@ -21,6 +21,8 @@ interface AgentState {
   readyAgentIds: string[];
   /** Whether the Kanban panel is visible */
   showKanban: boolean;
+  /** Whether the Chat Tools panel is visible */
+  showChatTools: boolean;
 }
 
 interface AgentActions {
@@ -41,6 +43,8 @@ interface AgentActions {
   refreshModels: (agentId: string) => Promise<void>;
   /** Toggle or set Kanban panel visibility */
   setShowKanban: (show: boolean) => void;
+  /** Toggle or set Chat Tools panel visibility */
+  setShowChatTools: (show: boolean) => void;
 }
 
 export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
@@ -52,6 +56,7 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
   agentError: null,
   readyAgentIds: [],
   showKanban: false,
+  showChatTools: false,
 
   fetchAgents: async () => {
     set({ loading: true });
@@ -333,7 +338,11 @@ export const useAgentStore = create<AgentState & AgentActions>((set, get) => ({
   },
 
   setShowKanban: (show) => {
-    set({ showKanban: show });
+    set({ showKanban: show, showChatTools: false });
+  },
+
+  setShowChatTools: (show) => {
+    set({ showChatTools: show, showKanban: false });
   },
 }));
 

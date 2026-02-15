@@ -60,6 +60,7 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         ("008_scheduling", include_str!("../../migrations/008_scheduling.sql")),
         ("009_agent_skills", include_str!("../../migrations/009_agent_skills.sql")),
         ("010_workspaces", include_str!("../../migrations/010_workspaces.sql")),
+        ("011_chat_tools", include_str!("../../migrations/011_chat_tools.sql")),
     ];
 
     for (name, sql) in migrations {

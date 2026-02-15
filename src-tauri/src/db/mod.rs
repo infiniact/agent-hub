@@ -1,5 +1,6 @@
 pub mod agent_md;
 pub mod agent_repo;
+pub mod chat_tool_repo;
 pub mod message_repo;
 pub mod migrations;
 pub mod session_repo;

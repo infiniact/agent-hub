@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod chat_tool;
 pub mod commands;
 pub mod db;
 pub mod error;
@@ -16,6 +17,17 @@ pub fn run() {
 
     // Create app state before building
     let app_state = AppState::new(conn);
+
+    // Reset stale chat tool statuses from previous session
+    match db::chat_tool_repo::reset_stale_statuses(&app_state) {
+        Ok(count) if count > 0 => {
+            log::info!("Reset {} stale chat tool statuses on startup", count);
+        }
+        Err(e) => {
+            log::warn!("Failed to reset stale chat tool statuses: {}", e);
+        }
+        _ => {}
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -123,6 +135,20 @@ pub fn run() {
             commands::workspace_commands::update_workspace,
             commands::workspace_commands::delete_workspace,
             commands::workspace_commands::select_workspace_directory,
+            // Chat tool commands
+            commands::chat_tool_commands::list_chat_tools,
+            commands::chat_tool_commands::get_chat_tool,
+            commands::chat_tool_commands::create_chat_tool,
+            commands::chat_tool_commands::update_chat_tool,
+            commands::chat_tool_commands::delete_chat_tool,
+            commands::chat_tool_commands::start_chat_tool,
+            commands::chat_tool_commands::stop_chat_tool,
+            commands::chat_tool_commands::logout_chat_tool,
+            commands::chat_tool_commands::get_chat_tool_qr_code,
+            commands::chat_tool_commands::list_chat_tool_messages,
+            commands::chat_tool_commands::send_chat_tool_message,
+            commands::chat_tool_commands::list_chat_tool_contacts,
+            commands::chat_tool_commands::set_chat_tool_contact_blocked,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
